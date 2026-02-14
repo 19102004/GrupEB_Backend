@@ -2,21 +2,18 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import {
-  createCliente,
-  getClientes,
-  getClienteById,
-  updateCliente,
-  deleteCliente,
-  searchClientes,
-  createClienteLigero,
-} from "../../controllers/clientes/clientes.controller";
+  createProductoPlastico,
+  getProductosPlastico,
+  getProductoPlasticoById,
+  updateProductoPlastico,
+  //deleteProductoPlastico,
+} from "../../controllers/productos/productos-plastico.controller";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 import {
   validateId,
   preventSQLInjection,
-  validateCreateCliente,
-  validateUpdateCliente,
-  validateCreateClienteLigero,
+  validateCreateProductoPlastico,
+  validateUpdateProductoPlastico,
 } from "../../middlewares/validation.middleware";
 
 const router = Router();
@@ -36,9 +33,9 @@ router.use(
 // ==========================
 const createLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hora
-  max: 50, // 50 clientes por hora
+  max: 100, // 100 productos por hora
   message: {
-    error: "Demasiados clientes creados. Intenta más tarde.",
+    error: "Demasiados productos creados. Intenta más tarde.",
   },
   standardHeaders: true,
   legacyHeaders: false,
@@ -47,7 +44,7 @@ const createLimiter = rateLimit({
 
 const updateDeleteLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100, // 100 operaciones por 15 minutos
+  max: 150, // 150 operaciones por 15 minutos
   message: {
     error: "Demasiadas operaciones. Intenta más tarde.",
   },
@@ -71,48 +68,40 @@ router.use(generalLimiter);
 // RUTAS PROTEGIDAS
 // ==========================
 
-// Buscar clientes (GET con query params)
-// Ejemplo: GET /api/clientes/search?query=Juan
-router.get("/search", authMiddleware, searchClientes);
-
-// Crear cliente completo - Con validación completa
+// Crear producto plástico - Con validación completa
 router.post(
   "/",
   authMiddleware,
   createLimiter,
   preventSQLInjection,
-  validateCreateCliente,
-  createCliente
+  validateCreateProductoPlastico,
+  createProductoPlastico
 );
 
-// Crear cliente ligero (para cotizaciones)
-router.post(
-  "/ligero",
-  authMiddleware,
-  createLimiter,
-  preventSQLInjection,
-  validateCreateClienteLigero,
-  createClienteLigero
-);
+// Obtener todos los productos plástico
+router.get("/", authMiddleware, getProductosPlastico);
 
-// Obtener todos los clientes
-router.get("/", authMiddleware, getClientes);
+// Obtener producto por ID
+router.get("/:id", authMiddleware, validateId, getProductoPlasticoById);
 
-// Obtener cliente por ID
-router.get("/:id", authMiddleware, validateId, getClienteById);
-
-// Actualizar cliente - Con validación completa
+// Actualizar producto - Con validación completa
 router.put(
   "/:id",
   authMiddleware,
   updateDeleteLimiter,
   preventSQLInjection,
   validateId,
-  validateUpdateCliente,
-  updateCliente
+  validateUpdateProductoPlastico,
+  updateProductoPlastico
 );
 
-// Eliminar cliente
-router.delete("/:id", authMiddleware, updateDeleteLimiter, validateId, deleteCliente);
+// Eliminar producto
+router.delete(
+  "/:id",
+  authMiddleware,
+  updateDeleteLimiter,
+  validateId,
+  //deleteProductoPlastico
+);
 
 export default router;

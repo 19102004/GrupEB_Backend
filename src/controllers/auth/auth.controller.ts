@@ -16,12 +16,26 @@ const MAX_LOGIN_ATTEMPTS = 100;
 // ==========================
 export const login = async (req: Request, res: Response) => {
   try {
-    const { codigo } = req.body;
+    const { codigo, correo } = req.body;
 
     console.log("🔑 Intento de login");
 
-    // Validación estricta
-    if (!codigo || !/^\d{5}$/.test(codigo)) {
+    // Validación estricta de ambos campos
+    if (!codigo || !correo) {
+      return res.status(401).json({ 
+        error: "Credenciales inválidas" 
+      });
+    }
+
+    // Validar formato del código
+    if (!/^\d{5}$/.test(codigo)) {
+      return res.status(401).json({ 
+        error: "Credenciales inválidas" 
+      });
+    }
+
+    // Validar formato del correo
+    if (!validator.isEmail(correo)) {
       return res.status(401).json({ 
         error: "Credenciales inválidas" 
       });
@@ -29,34 +43,33 @@ export const login = async (req: Request, res: Response) => {
 
     // Sanitización
     const codigoSanitizado = codigo.replace(/\D/g, "");
+    const correoSanitizado = validator.normalizeEmail(correo) || correo.toLowerCase().trim();
 
-    // Consulta optimizada con LIMIT
+    // Consulta optimizada: buscar usuario por correo
     const result = await pool.query(
       `SELECT u.idusuario, u.nombre, u.apellido, u.correo, u.codigo, 
               r.nombre as rol, r.acceso_total
        FROM usuarios u
        LEFT JOIN roles r ON u.roles_idroles = r.idroles
-       LIMIT $1`,
-      [MAX_LOGIN_ATTEMPTS]
+       WHERE LOWER(u.correo) = LOWER($1)
+       LIMIT 1`,
+      [correoSanitizado]
     );
 
     if ((result.rowCount ?? 0) === 0) {
+      // Delay para prevenir timing attacks
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       return res.status(401).json({ 
         error: "Credenciales inválidas" 
       });
     }
 
-    // Búsqueda del usuario
-    let usuario = null;
-    for (const u of result.rows) {
-      const isMatch = await bcrypt.compare(codigoSanitizado, u.codigo);
-      if (isMatch) {
-        usuario = u;
-        break;
-      }
-    }
+    const usuario = result.rows[0];
 
-    if (!usuario) {
+    // Verificar el código hasheado
+    const isMatch = await bcrypt.compare(codigoSanitizado, usuario.codigo);
+    
+    if (!isMatch) {
       // Delay para prevenir timing attacks
       await new Promise((resolve) => setTimeout(resolve, 1000));
       return res.status(401).json({ 

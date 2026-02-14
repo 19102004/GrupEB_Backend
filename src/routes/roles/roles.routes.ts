@@ -1,7 +1,10 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import helmet from "helmet";
-import { getRoles } from "../../controllers/roles/roles.controller";
+import { 
+  getRoles,
+  getPrivilegiosByRol 
+} from "../../controllers/roles/roles.controller";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 
 const router = Router();
@@ -20,7 +23,7 @@ router.use(
 // RATE LIMITING
 // ==========================
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 15 * 60 * 1000, // 15 minutos
   max: 100,
   message: { 
     error: "Demasiadas solicitudes. Intenta más tarde." 
@@ -35,5 +38,6 @@ router.use(generalLimiter);
 // RUTAS
 // ==========================
 router.get("/", authMiddleware, getRoles);
+router.get("/:id/privilegios", authMiddleware, getPrivilegiosByRol);
 
 export default router;

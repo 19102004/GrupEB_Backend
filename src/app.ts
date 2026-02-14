@@ -8,9 +8,13 @@ import authRoutes from "./routes/auth/auth.routes";
 import rolesRoutes from "./routes/roles/roles.routes";
 import privilegiosRoutes from "./routes/privilegios/privilegios.routes";
 import usuariosRoutes from "./routes/usuarios/usuarios.routes";
-import catalogosRoutes from "./routes/catalogos/catalogos.routes";
+import catalogosRoutes from "./routes/catalogos_fiscales/catalogos.routes";
 import clientesRoutes from "./routes/clientes/clientes.routes";
 import tarifasRoutes from "./routes/tarifas/tarifas.routes";
+import catalogosProductosRoutes from "./routes/productos/catalogos-productos.routes";
+import productosPlasticoRoutes from "./routes/productos/productos-plastico.routes";
+import catalogosProduccionRoutes from "./routes/catalogos_produccion/catalogos-produccion.routes"; // ✅ NUEVO
+import cotizacionesRoutes from "./routes/cotizaciones/cotizaciones.routes"; // ✅ NUEVO
 
 const app = express();
 
@@ -37,6 +41,10 @@ app.use("/api/usuarios", usuariosRoutes);
 app.use("/api/catalogos", catalogosRoutes);
 app.use("/api/clientes", clientesRoutes);
 app.use("/api/tarifas", tarifasRoutes);
+app.use("/api/catalogos-productos", catalogosProductosRoutes);
+app.use("/api/productos-plastico", productosPlasticoRoutes);
+app.use("/api/catalogos-produccion", catalogosProduccionRoutes); // ✅ NUEVO
+app.use("/api/cotizaciones", cotizacionesRoutes); // ✅ NUEVO
 
 // ==========================
 // HEALTH CHECK

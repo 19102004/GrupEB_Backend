@@ -265,6 +265,67 @@ export const getClienteById = async (req: Request, res: Response) => {
 };
 
 // ==========================
+// BUSCAR CLIENTES (CON FILTROS)
+// ==========================
+export const searchClientes = async (req: Request, res: Response) => {
+  try {
+    const { query } = req.query;
+
+    // Si no hay query, devolver últimos 50 clientes
+    if (!query || typeof query !== 'string' || query.trim() === '') {
+      const result = await pool.query(`
+        SELECT 
+          c.idclientes,
+          c.empresa,
+          c.correo,
+          c.telefono,
+          c.atencion,
+          c.celular,
+          c.razon_social
+        FROM clientes c
+        ORDER BY c.idclientes DESC
+        LIMIT 50
+      `);
+
+      return res.json(result.rows);
+    }
+
+    // Búsqueda con filtros (nombre, empresa, teléfono, correo)
+    const searchTerm = `%${query.trim()}%`;
+    
+    const result = await pool.query(
+      `
+      SELECT 
+        c.idclientes,
+        c.empresa,
+        c.correo,
+        c.telefono,
+        c.atencion,
+        c.celular,
+        c.razon_social
+      FROM clientes c
+      WHERE 
+        c.atencion ILIKE $1 OR
+        c.empresa ILIKE $1 OR
+        c.telefono ILIKE $1 OR
+        c.celular ILIKE $1 OR
+        c.correo ILIKE $1
+      ORDER BY c.idclientes DESC
+      LIMIT 50
+    `,
+      [searchTerm]
+    );
+
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error("❌ SEARCH CLIENTES ERROR:", error.message);
+    res.status(500).json({
+      error: "Error al buscar clientes",
+    });
+  }
+};
+
+// ==========================
 // ACTUALIZAR CLIENTE
 // ==========================
 export const updateCliente = async (req: Request, res: Response) => {
@@ -518,6 +579,91 @@ export const deleteCliente = async (req: Request, res: Response) => {
   } catch (error: any) {
     await client.query("ROLLBACK");
     console.error("❌ DELETE CLIENTE ERROR:", error.message);
+    res.status(500).json({
+      error: "Error al procesar la solicitud",
+    });
+  } finally {
+    client.release();
+  }
+};
+
+// ==========================
+// CREAR CLIENTE LIGERO (PARA COTIZACIÓN)
+// ==========================
+export const createClienteLigero = async (req: Request, res: Response) => {
+  const client = await pool.connect();
+
+  try {
+    const {
+      nombre,
+      telefono,
+      correo,
+      empresa,
+    } = req.body;
+
+    console.log("📝 Creando cliente ligero para cotización:", { nombre, correo });
+
+    await client.query("BEGIN");
+
+    // Verificar si el correo ya existe (opcional pero recomendado)
+    if (correo) {
+      const existeCorreo = await client.query(
+        "SELECT 1 FROM clientes WHERE correo = $1 LIMIT 1",
+        [correo]
+      );
+
+      if ((existeCorreo.rowCount ?? 0) > 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: "El correo ya está registrado",
+        });
+      }
+    }
+
+    // Insertar cliente mínimo (solo campos requeridos para cotización)
+    // Usar valores por defecto para los campos requeridos en BD
+    const resultCliente = await client.query(
+      `INSERT INTO clientes (
+        regimen_fiscal_idregimen_fiscal,
+        metodo_pago_idmetodo_pago,
+        forma_pago_idforma_pago,
+        empresa,
+        correo,
+        telefono,
+        atencion,
+        fecha
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+      RETURNING idclientes, empresa, correo, telefono, atencion`,
+      [
+        1, // Régimen fiscal por defecto (debes tener un ID válido)
+        1, // Método de pago por defecto
+        1, // Forma de pago por defecto
+        empresa || null,
+        correo || null,
+        telefono || null,
+        nombre, // El nombre va en "atención"
+      ]
+    );
+
+    const nuevoCliente = resultCliente.rows[0];
+
+    await client.query("COMMIT");
+
+    console.log("✅ Cliente ligero creado:", { id: nuevoCliente.idclientes });
+
+    res.status(201).json({
+      message: "Cliente creado exitosamente",
+      cliente: {
+        id: nuevoCliente.idclientes,
+        nombre: nuevoCliente.atencion,
+        empresa: nuevoCliente.empresa,
+        correo: nuevoCliente.correo,
+        telefono: nuevoCliente.telefono,
+      },
+    });
+  } catch (error: any) {
+    await client.query("ROLLBACK");
+    console.error("❌ CREATE CLIENTE LIGERO ERROR:", error.message);
     res.status(500).json({
       error: "Error al procesar la solicitud",
     });

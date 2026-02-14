@@ -5,28 +5,39 @@ import validator from "validator";
 // VALIDACIÓN DE LOGIN
 // ==========================
 export const validateLogin = (req: Request, res: Response, next: NextFunction) => {
-  const { codigo } = req.body;
-
-  // Validar que existe
-  if (!codigo) {
-    return res.status(400).json({ error: "El código es requerido" });
-  }
-
-  // Validar que es string
-  if (typeof codigo !== "string") {
-    return res.status(400).json({ error: "Datos de entrada inválidos" });
-  }
-
-  // Sanitizar y validar formato
-  const codigoLimpio = codigo.trim().replace(/\D/g, "");
+  const { codigo, correo } = req.body;
   
-  if (!/^\d{5}$/.test(codigoLimpio)) {
+  // Validar que ambos campos existan
+  if (!codigo || !correo) {
+    return res.status(400).json({ error: "Correo y código son requeridos" });
+  }
+  
+  // Validar tipos
+  if (typeof codigo !== "string" || typeof correo !== "string") {
     return res.status(400).json({ error: "Datos de entrada inválidos" });
   }
-
-  // Reemplazar en el body
+  
+  // Sanitizar y validar código
+  const codigoLimpio = codigo.trim().replace(/\D/g, "");
+  if (!/^\d{5}$/.test(codigoLimpio)) {
+    return res.status(400).json({ error: "Formato de código inválido" });
+  }
+  
+  // Validar formato de correo
+  const correoLimpio = correo.trim().toLowerCase();
+  if (!validator.isEmail(correoLimpio)) {
+    return res.status(400).json({ error: "Formato de correo inválido" });
+  }
+  
+  // Validar longitud del correo (prevenir ataques)
+  if (correoLimpio.length > 255) {
+    return res.status(400).json({ error: "Correo demasiado largo" });
+  }
+  
+  // Reemplazar en el body con valores sanitizados
   req.body.codigo = codigoLimpio;
-
+  req.body.correo = correoLimpio;
+  
   next();
 };
 
@@ -535,6 +546,56 @@ export const validateCreateCliente = (req: Request, res: Response, next: NextFun
   next();
 };
 
+
+// ==========================
+// VALIDACIÓN PARA CLIENTE LIGERO
+// ==========================
+export const validateCreateClienteLigero = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const { nombre, telefono, correo, empresa } = req.body;
+
+  // Al menos nombre O correo son requeridos
+  if (!nombre && !correo) {
+    return res.status(400).json({
+      error: "Se requiere al menos nombre o correo del cliente",
+    });
+  }
+
+  // Validar formato de correo si se proporciona
+  if (correo && typeof correo === 'string') {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(correo)) {
+      return res.status(400).json({
+        error: "Formato de correo inválido",
+      });
+    }
+  }
+
+  // Validar longitud de campos si se proporcionan
+  if (nombre && typeof nombre === 'string' && nombre.length > 255) {
+    return res.status(400).json({
+      error: "El nombre es demasiado largo (máximo 255 caracteres)",
+    });
+  }
+
+  if (empresa && typeof empresa === 'string' && empresa.length > 255) {
+    return res.status(400).json({
+      error: "El nombre de empresa es demasiado largo (máximo 255 caracteres)",
+    });
+  }
+
+  if (telefono && typeof telefono === 'string' && telefono.length > 20) {
+    return res.status(400).json({
+      error: "El teléfono es demasiado largo (máximo 20 caracteres)",
+    });
+  }
+
+  next();
+};
+
 // ==========================
 // VALIDACIÓN DE ACTUALIZAR CLIENTE
 // ==========================
@@ -595,4 +656,128 @@ export const sanitizeInput = (input: string): string => {
   sanitized = sanitized.replace(/\s+/g, " ").trim();
   
   return sanitized;
+};
+
+// ==========================
+// VALIDACIÓN CREAR PRODUCTO PLÁSTICO
+// ==========================
+export const validateCreateProductoPlastico = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const {
+    tipo_producto_plastico_id,
+    material_plastico_id,
+    calibre_id,
+    altura,
+    ancho,
+    medida,
+    por_kilo,
+  } = req.body;
+
+  const errors: string[] = [];
+
+  // Validar IDs de catálogos
+  if (!tipo_producto_plastico_id || !Number.isInteger(tipo_producto_plastico_id)) {
+    errors.push("El tipo de producto es requerido y debe ser un número entero");
+  }
+
+  if (!material_plastico_id || !Number.isInteger(material_plastico_id)) {
+    errors.push("El material es requerido y debe ser un número entero");
+  }
+
+  if (!calibre_id || !Number.isInteger(calibre_id)) {
+    errors.push("El calibre es requerido y debe ser un número entero");
+  }
+
+  // Validar medidas obligatorias
+  if (!altura || typeof altura !== "number" || altura <= 0) {
+    errors.push("La altura es requerida y debe ser mayor a 0");
+  }
+
+  if (!ancho || typeof ancho !== "number" || ancho <= 0) {
+    errors.push("El ancho es requerido y debe ser mayor a 0");
+  }
+
+  // Validar medida formateada
+  if (!medida || typeof medida !== "string" || medida.trim() === "") {
+    errors.push("La medida formateada es requerida");
+  }
+
+  // Validar por_kilo
+  if (!por_kilo || typeof por_kilo !== "number" || por_kilo <= 0) {
+    errors.push("Las bolsas por kilo son requeridas y deben ser mayor a 0");
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      error: "Datos inválidos",
+      details: errors,
+    });
+  }
+
+  next();
+};
+
+// ==========================
+// VALIDACIÓN ACTUALIZAR PRODUCTO PLÁSTICO
+// ==========================
+export const validateUpdateProductoPlastico = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const {
+    tipo_producto_plastico_id,
+    material_plastico_id,
+    calibre_id,
+    altura,
+    ancho,
+    medida,
+    por_kilo,
+  } = req.body;
+
+  const errors: string[] = [];
+
+  // Validar IDs de catálogos
+  if (!tipo_producto_plastico_id || !Number.isInteger(tipo_producto_plastico_id)) {
+    errors.push("El tipo de producto es requerido y debe ser un número entero");
+  }
+
+  if (!material_plastico_id || !Number.isInteger(material_plastico_id)) {
+    errors.push("El material es requerido y debe ser un número entero");
+  }
+
+  if (!calibre_id || !Number.isInteger(calibre_id)) {
+    errors.push("El calibre es requerido y debe ser un número entero");
+  }
+
+  // Validar medidas obligatorias
+  if (!altura || typeof altura !== "number" || altura <= 0) {
+    errors.push("La altura es requerida y debe ser mayor a 0");
+  }
+
+  if (!ancho || typeof ancho !== "number" || ancho <= 0) {
+    errors.push("El ancho es requerido y debe ser mayor a 0");
+  }
+
+  // Validar medida formateada
+  if (!medida || typeof medida !== "string" || medida.trim() === "") {
+    errors.push("La medida formateada es requerida");
+  }
+
+  // Validar por_kilo
+  if (!por_kilo || typeof por_kilo !== "number" || por_kilo <= 0) {
+    errors.push("Las bolsas por kilo son requeridas y deben ser mayor a 0");
+  }
+
+  if (errors.length > 0) {
+    return res.status(400).json({
+      error: "Datos inválidos",
+      details: errors,
+    });
+  }
+
+  next();
 };

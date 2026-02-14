@@ -5,7 +5,7 @@ import {
   getRegimenesFiscales,
   getMetodosPago,
   getFormasPago
-} from "../../controllers/catalogos/catalogos.controller";
+} from "../../controllers/catalogos_fiscales/catalogos.controller";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 
 const router = Router();
