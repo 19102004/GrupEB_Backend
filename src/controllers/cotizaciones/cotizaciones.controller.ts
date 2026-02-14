@@ -1,22 +1,28 @@
 import { Request, Response } from "express";
 import { pool } from "../../config/db";
 
+// ── IDs de estado en la tabla estado_administrativo_cat ─────────────────────
+// 1 = Pendiente | 2 = En proceso | 3 = Aprobado | 4 = Rechazado | 5 = Enviado
+const ESTADO = {
+  PENDIENTE:   1,
+  EN_PROCESO:  2,
+  APROBADO:    3,
+  RECHAZADO:   4,
+} as const;
+
+// ── Normaliza el nombre del estado que viene de la BD ───────────────────────
+// Unifica a los 3 valores que muestra el frontend en cotizaciones
+function normalizarNombreEstado(nombre: string): string {
+  if (!nombre) return "Pendiente";
+  const n = nombre.toLowerCase().trim();
+  if (n === "aprobado" || n === "aprobada")   return "Aprobada";
+  if (n === "rechazado" || n === "rechazada") return "Rechazada";
+  // "pendiente", "en proceso", cualquier otro → Pendiente
+  return "Pendiente";
+}
+
 // ============================================================
 // CREAR COTIZACIÓN
-//
-// Body esperado:
-// {
-//   clienteId: number,
-//   productos: [{
-//     productoId: number,   ← configuracion_plastico_idconfiguracion_plastico
-//     tintasId:   number,
-//     carasId:    number,
-//     detalles: [{
-//       cantidad:    number,
-//       precio_total: number   ← cantidad * precio_unitario calculado en frontend
-//     }]
-//   }]
-// }
 // ============================================================
 export const crearCotizacion = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -34,9 +40,6 @@ export const crearCotizacion = async (req: Request, res: Response) => {
 
     await client.query("BEGIN");
 
-    const ESTADO_PENDIENTE = 1;
-
-    // 🔥 1️⃣ Crear cabecera UNA sola vez
     const { rows: cotRows } = await client.query(
       `INSERT INTO cotizacion (
         clientes_idclientes,
@@ -44,27 +47,27 @@ export const crearCotizacion = async (req: Request, res: Response) => {
       )
       VALUES ($1,$2)
       RETURNING idcotizacion, no_cotizacion`,
-      [clienteId, ESTADO_PENDIENTE]
+      [clienteId, ESTADO.PENDIENTE]
     );
 
     const cotizacionId = cotRows[0].idcotizacion;
     const noCotizacion = cotRows[0].no_cotizacion;
 
-    // 🔥 2️⃣ Insertar productos
     for (const producto of productos) {
       const {
         productoId,
         tintasId,
         carasId,
         detalles,
-        bk = null,
-        foil = null,
-        asaSuaje = null,
-        altoRel = null,
-        laminado = null,
-        uvBr = null,
+        observacion = null,
+        bk        = null,
+        foil      = null,
+        asaSuaje  = null,
+        altoRel   = null,
+        laminado  = null,
+        uvBr      = null,
         pigmentos = null,
-        pantones = null,
+        pantones  = null,
       } = producto;
 
       if (!productoId) {
@@ -83,52 +86,33 @@ export const crearCotizacion = async (req: Request, res: Response) => {
         });
       }
 
-      // 🔥 Insertar producto
       const { rows: prodRows } = await client.query(
         `INSERT INTO cotizacion_producto (
           cotizacion_idcotizacion,
           configuracion_plastico_idconfiguracion_plastico,
           tintas_idtintas,
           caras_idcaras,
-          bk,
-          foil,
-          asa_suaje,
-          alto_rel,
-          laminado,
-          uv_br,
-          pigmentos,
-          pantones
+          bk, foil, asa_suaje, alto_rel, laminado, uv_br, pigmentos, pantones,
+          observacion
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         RETURNING idcotizacion_producto`,
         [
-          cotizacionId,
-          productoId,
-          tintasId,
-          carasId,
-          bk,
-          foil,
-          asaSuaje,
-          altoRel,
-          laminado,
-          uvBr,
-          pigmentos,
-          pantones,
+          cotizacionId, productoId, tintasId, carasId,
+          bk, foil, asaSuaje, altoRel, laminado, uvBr, pigmentos, pantones,
+          observacion,
         ]
       );
 
       const cotizacionProductoId = prodRows[0].idcotizacion_producto;
 
-      // 🔥 Insertar detalles
       for (const d of detallesValidos) {
         await client.query(
           `INSERT INTO cotizacion_detalle (
-            cotizacion_producto_id,
-            cantidad,
-            precio_total
+            cotizacion_producto_id, cantidad, precio_total, aprobado
           )
-          VALUES ($1,$2,$3)`,
-          [cotizacionProductoId, d.cantidad, d.precio_total]
+          VALUES ($1,$2,$3,$4)`,
+          [cotizacionProductoId, d.cantidad, d.precio_total, null]
         );
       }
     }
@@ -151,11 +135,9 @@ export const crearCotizacion = async (req: Request, res: Response) => {
 
 // ============================================================
 // OBTENER COTIZACIONES
-// Agrupadas por no_cotizacion con sus productos y detalles.
 // ============================================================
 export const getCotizaciones = async (req: Request, res: Response) => {
   try {
-    // 🔥 Query SIMPLE usando solo los campos que existen en tu BD
     const { rows } = await pool.query(`
       SELECT
           c.idcotizacion,
@@ -165,9 +147,9 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           c.estado_administrativo_cat_idestado_administrativo_cat,
 
           cli.razon_social AS cliente_nombre,
-          cli.empresa AS cliente_empresa,
-          cli.telefono AS cliente_telefono,
-          cli.correo AS cliente_correo,
+          cli.empresa      AS cliente_empresa,
+          cli.telefono     AS cliente_telefono,
+          cli.correo       AS cliente_correo,
 
           est.nombre AS estado_nombre,
 
@@ -175,19 +157,14 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           cp.configuracion_plastico_idconfiguracion_plastico,
           cp.tintas_idtintas,
           cp.caras_idcaras,
-          cp.bk,
-          cp.foil,
-          cp.asa_suaje,
-          cp.alto_rel,
-          cp.laminado,
-          cp.uv_br,
-          cp.pigmentos,
-          cp.pantones,
+          cp.bk, cp.foil, cp.asa_suaje, cp.alto_rel,
+          cp.laminado, cp.uv_br, cp.pigmentos, cp.pantones,
           cp.observacion,
 
           cd.idcotizacion_detalle,
           cd.cantidad,
-          cd.precio_total
+          cd.precio_total,
+          cd.aprobado
 
       FROM cotizacion c
 
@@ -195,7 +172,8 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           ON cli.idclientes = c.clientes_idclientes
 
       LEFT JOIN estado_administrativo_cat est
-          ON est.idestado_administrativo_cat = c.estado_administrativo_cat_idestado_administrativo_cat
+          ON est.idestado_administrativo_cat
+           = c.estado_administrativo_cat_idestado_administrativo_cat
 
       LEFT JOIN cotizacion_producto cp
           ON cp.cotizacion_idcotizacion = c.idcotizacion
@@ -206,19 +184,18 @@ export const getCotizaciones = async (req: Request, res: Response) => {
       ORDER BY c.no_cotizacion DESC, cp.idcotizacion_producto, cd.idcotizacion_detalle
     `);
 
-    // 🔥 Agrupar por no_cotizacion
     const agrupadas: Record<number, any> = {};
 
     for (const row of rows) {
       const noCot: number = row.no_cotizacion;
 
-      // 🔥 Crear cotización si no existe
       if (!agrupadas[noCot]) {
         agrupadas[noCot] = {
           no_cotizacion: noCot,
           fecha:         row.fecha,
           estado_id:     row.estado_administrativo_cat_idestado_administrativo_cat,
-          estado:        row.estado_nombre || "Sin estado",
+          // 🔥 Nombre normalizado para el frontend
+          estado:        normalizarNombreEstado(row.estado_nombre || ""),
           cliente_id:    row.clientes_idclientes,
           cliente:       row.cliente_nombre   || "",
           telefono:      row.cliente_telefono || "",
@@ -229,20 +206,17 @@ export const getCotizaciones = async (req: Request, res: Response) => {
         };
       }
 
-      // 🔥 Si hay producto, agregarlo o actualizarlo
       if (row.idcotizacion_producto) {
-        // Buscar si el producto ya existe en el array
         let producto = agrupadas[noCot].productos.find(
           (p: any) => p.idcotizacion_producto === row.idcotizacion_producto
         );
 
-        // Si no existe, crearlo
         if (!producto) {
           producto = {
-            idcotizacion: row.idcotizacion,
+            idcotizacion:          row.idcotizacion,
             idcotizacion_producto: row.idcotizacion_producto,
             producto_id:  row.configuracion_plastico_idconfiguracion_plastico,
-            nombre: `Producto #${row.configuracion_plastico_idconfiguracion_plastico}`, // 🔥 Nombre genérico
+            nombre:       `Producto #${row.configuracion_plastico_idconfiguracion_plastico}`,
             tintas:       row.tintas_idtintas,
             caras:        row.caras_idcaras,
             bk:           row.bk,
@@ -260,12 +234,12 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           agrupadas[noCot].productos.push(producto);
         }
 
-        // 🔥 Si hay detalle, agregarlo
         if (row.idcotizacion_detalle) {
           const detalle = {
-            iddetalle: row.idcotizacion_detalle,
-            cantidad: Number(row.cantidad),
+            iddetalle:    row.idcotizacion_detalle,
+            cantidad:     Number(row.cantidad),
             precio_total: Number(row.precio_total),
+            aprobado:     row.aprobado,
           };
           producto.detalles.push(detalle);
           producto.subtotal += detalle.precio_total;
@@ -273,7 +247,6 @@ export const getCotizaciones = async (req: Request, res: Response) => {
       }
     }
 
-    // 🔥 Calcular total de cada cotización
     for (const noCot in agrupadas) {
       agrupadas[noCot].total = agrupadas[noCot].productos.reduce(
         (sum: number, p: any) => sum + p.subtotal,
@@ -284,6 +257,7 @@ export const getCotizaciones = async (req: Request, res: Response) => {
     const resultado = Object.values(agrupadas);
     console.log(`✅ Cotizaciones obtenidas: ${resultado.length}`);
     return res.json(resultado);
+
   } catch (error: any) {
     console.error("❌ GET COTIZACIONES ERROR:", error.message);
     return res.status(500).json({ error: "Error al obtener cotizaciones" });
@@ -292,11 +266,10 @@ export const getCotizaciones = async (req: Request, res: Response) => {
 
 // ============================================================
 // ACTUALIZAR ESTADO (por no_cotizacion)
-// Body: { estadoId: number }
 // ============================================================
 export const actualizarEstadoCotizacion = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const { id }       = req.params;
     const { estadoId } = req.body;
 
     if (!estadoId) {
@@ -323,8 +296,7 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
 };
 
 // ============================================================
-// ELIMINAR COTIZACIÓN (por no_cotizacion)
-// Elimina detalles primero (FK), luego productos, luego cabecera.
+// ELIMINAR COTIZACIÓN
 // ============================================================
 export const eliminarCotizacion = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -334,7 +306,6 @@ export const eliminarCotizacion = async (req: Request, res: Response) => {
 
     await client.query("BEGIN");
 
-    // Obtener IDs de cotizaciones con ese número
     const { rows: cotRows } = await client.query(
       `SELECT idcotizacion FROM cotizacion WHERE no_cotizacion = $1`,
       [id]
@@ -347,33 +318,27 @@ export const eliminarCotizacion = async (req: Request, res: Response) => {
 
     const cotizacionIds: number[] = cotRows.map((r: any) => r.idcotizacion);
 
-    // Obtener IDs de productos
     const { rows: prodRows } = await client.query(
-      `SELECT idcotizacion_producto 
-       FROM cotizacion_producto 
+      `SELECT idcotizacion_producto
+       FROM cotizacion_producto
        WHERE cotizacion_idcotizacion = ANY($1::int[])`,
       [cotizacionIds]
     );
 
     const productoIds: number[] = prodRows.map((r: any) => r.idcotizacion_producto);
 
-    // 🔥 Eliminar detalles
     if (productoIds.length > 0) {
       await client.query(
-        `DELETE FROM cotizacion_detalle 
-         WHERE cotizacion_producto_id = ANY($1::int[])`,
+        `DELETE FROM cotizacion_detalle WHERE cotizacion_producto_id = ANY($1::int[])`,
         [productoIds]
       );
     }
 
-    // 🔥 Eliminar productos
     await client.query(
-      `DELETE FROM cotizacion_producto 
-       WHERE cotizacion_idcotizacion = ANY($1::int[])`,
+      `DELETE FROM cotizacion_producto WHERE cotizacion_idcotizacion = ANY($1::int[])`,
       [cotizacionIds]
     );
 
-    // 🔥 Eliminar cotización
     await client.query(
       `DELETE FROM cotizacion WHERE no_cotizacion = $1`,
       [id]
@@ -382,11 +347,70 @@ export const eliminarCotizacion = async (req: Request, res: Response) => {
     await client.query("COMMIT");
     console.log(`✅ Cotización #${id} eliminada`);
     return res.json({ message: "Cotización eliminada exitosamente" });
+
   } catch (error: any) {
     await client.query("ROLLBACK");
     console.error("❌ ELIMINAR COTIZACIÓN ERROR:", error.message);
     return res.status(500).json({ error: "Error al eliminar cotización" });
   } finally {
     client.release();
+  }
+};
+
+// ============================================================
+// APROBAR / RECHAZAR DETALLE INDIVIDUAL
+// ============================================================
+export const aprobarDetalle = async (req: Request, res: Response) => {
+  try {
+    const { id }       = req.params;
+    const { aprobado } = req.body;
+
+    if (typeof aprobado !== "boolean") {
+      return res.status(400).json({
+        error: "El campo aprobado debe ser true o false",
+      });
+    }
+
+    const { rowCount } = await pool.query(
+      `UPDATE cotizacion_detalle SET aprobado = $1 WHERE idcotizacion_detalle = $2`,
+      [aprobado, id]
+    );
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "Detalle no encontrado" });
+    }
+
+    console.log(`✅ Detalle #${id} → ${aprobado ? "APROBADO" : "RECHAZADO"}`);
+    return res.json({ message: aprobado ? "Aprobado" : "Rechazado", aprobado });
+
+  } catch (error: any) {
+    console.error("❌ Error al aprobar/rechazar detalle:", error.message);
+    return res.status(500).json({ error: "Error al actualizar aprobación" });
+  }
+};
+
+// ============================================================
+// ACTUALIZAR OBSERVACIÓN DE PRODUCTO
+// ============================================================
+export const actualizarObservacion = async (req: Request, res: Response) => {
+  try {
+    const { id }          = req.params;
+    const { observacion } = req.body;
+
+    const { rowCount } = await pool.query(
+      `UPDATE cotizacion_producto SET observacion = $1 WHERE idcotizacion_producto = $2`,
+      [observacion || null, id]
+    );
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "Producto no encontrado" });
+    }
+
+    console.log(`✅ Observación actualizada para producto #${id}`);
+    return res.json({ message: "Observación actualizada", observacion });
+
+  } catch (error: any) {
+    console.error("❌ Error al actualizar observación:", error.message);
+    return res.status(500).json({ error: "Error al actualizar observación" });
   }
 };

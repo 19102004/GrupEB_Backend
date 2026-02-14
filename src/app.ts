@@ -15,6 +15,7 @@ import catalogosProductosRoutes from "./routes/productos/catalogos-productos.rou
 import productosPlasticoRoutes from "./routes/productos/productos-plastico.routes";
 import catalogosProduccionRoutes from "./routes/catalogos_produccion/catalogos-produccion.routes"; // ✅ NUEVO
 import cotizacionesRoutes from "./routes/cotizaciones/cotizaciones.routes"; // ✅ NUEVO
+import calcularPrecioRoutes from "./routes/cotizaciones/calcular-precio.routes"; // ✅ NUEVO
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.use("/api/catalogos-productos", catalogosProductosRoutes);
 app.use("/api/productos-plastico", productosPlasticoRoutes);
 app.use("/api/catalogos-produccion", catalogosProduccionRoutes); // ✅ NUEVO
 app.use("/api/cotizaciones", cotizacionesRoutes); // ✅ NUEVO
+app.use("/api", calcularPrecioRoutes); // ✅ NUEVO
 
 // ==========================
 // HEALTH CHECK

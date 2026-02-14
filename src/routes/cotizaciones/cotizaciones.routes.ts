@@ -6,6 +6,8 @@ import {
   getCotizaciones,
   actualizarEstadoCotizacion,
   eliminarCotizacion,
+  aprobarDetalle,
+  actualizarObservacion,
 } from "../../controllers/cotizaciones/cotizaciones.controller";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 
@@ -25,6 +27,14 @@ const limiter = rateLimit({
 
 router.use(limiter);
 
+// ── Rutas específicas PRIMERO (evitar conflicto con /:id/estado) ──────────
+// PATCH /api/cotizaciones/detalle/:id/aprobar
+router.patch("/detalle/:id/aprobar", authMiddleware, aprobarDetalle);
+
+// PATCH /api/cotizaciones/producto/:id/observacion
+router.patch("/producto/:id/observacion", authMiddleware, actualizarObservacion);
+
+// ── Rutas generales ───────────────────────────────────────────────────────
 // GET    /api/cotizaciones
 router.get("/", authMiddleware, getCotizaciones);
 
