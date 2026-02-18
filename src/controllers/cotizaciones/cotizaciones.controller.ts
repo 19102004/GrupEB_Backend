@@ -1,23 +1,30 @@
 import { Request, Response } from "express";
 import { pool } from "../../config/db";
 
-// ── IDs de estado en la tabla estado_administrativo_cat ─────────────────────
-// 1 = Pendiente | 2 = En proceso | 3 = Aprobado | 4 = Rechazado | 5 = Enviado
+// ── Tablas involucradas ──────────────────────────────────────────────────────
+// cotizacion            → idcotizacion, no_cotizacion, clientes_idclientes,
+//                         estado_administrativo_cat_idestado_administrativo_cat, fecha
+// cotizacion_producto   → idcotizacion_producto, cotizacion_idcotizacion,
+//                         configuracion_plastico_idconfiguracion_plastico,
+//                         tintas_idtintas, caras_idcaras,
+//                         bk, foil, idsuaje (FK→asa_suaje), alto_rel, laminado, uv_br,
+//                         pigmentos, pantones, observacion
+// cotizacion_detalle    → idcotizacion_detalle, cotizacion_producto_id,
+//                         cantidad, precio_total, aprobado
+// asa_suaje             → idsuaje, tipo, idproductos (FK→productos)
+
 const ESTADO = {
-  PENDIENTE:   1,
-  EN_PROCESO:  2,
-  APROBADO:    3,
-  RECHAZADO:   4,
+  PENDIENTE:  1,
+  EN_PROCESO: 2,
+  APROBADO:   3,
+  RECHAZADO:  4,
 } as const;
 
-// ── Normaliza el nombre del estado que viene de la BD ───────────────────────
-// Unifica a los 3 valores que muestra el frontend en cotizaciones
 function normalizarNombreEstado(nombre: string): string {
   if (!nombre) return "Pendiente";
   const n = nombre.toLowerCase().trim();
   if (n === "aprobado" || n === "aprobada")   return "Aprobada";
   if (n === "rechazado" || n === "rechazada") return "Rechazada";
-  // "pendiente", "en proceso", cualquier otro → Pendiente
   return "Pendiente";
 }
 
@@ -33,19 +40,19 @@ export const crearCotizacion = async (req: Request, res: Response) => {
     if (!clienteId) {
       return res.status(400).json({ error: "Se requiere clienteId" });
     }
-
     if (!productos || productos.length === 0) {
       return res.status(400).json({ error: "Se requiere al menos un producto" });
     }
 
     await client.query("BEGIN");
 
+    // ── Insertar cotizacion (tabla padre) ────────────────────
     const { rows: cotRows } = await client.query(
       `INSERT INTO cotizacion (
         clientes_idclientes,
         estado_administrativo_cat_idestado_administrativo_cat
       )
-      VALUES ($1,$2)
+      VALUES ($1, $2)
       RETURNING idcotizacion, no_cotizacion`,
       [clienteId, ESTADO.PENDIENTE]
     );
@@ -62,7 +69,9 @@ export const crearCotizacion = async (req: Request, res: Response) => {
         observacion = null,
         bk        = null,
         foil      = null,
-        asaSuaje  = null,
+        // 🔥 idsuaje es la FK hacia asa_suaje (integer | null)
+        // ya NO existe asa_suaje boolean en la tabla
+        idsuaje   = null,
         altoRel   = null,
         laminado  = null,
         uvBr      = null,
@@ -86,32 +95,35 @@ export const crearCotizacion = async (req: Request, res: Response) => {
         });
       }
 
+      // ── Insertar cotizacion_producto ─────────────────────────
+      // idsuaje es FK → asa_suaje.idsuaje (integer o null)
       const { rows: prodRows } = await client.query(
         `INSERT INTO cotizacion_producto (
           cotizacion_idcotizacion,
           configuracion_plastico_idconfiguracion_plastico,
           tintas_idtintas,
           caras_idcaras,
-          bk, foil, asa_suaje, alto_rel, laminado, uv_br, pigmentos, pantones,
+          bk, foil, idsuaje, alto_rel, laminado, uv_br, pigmentos, pantones,
           observacion
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         RETURNING idcotizacion_producto`,
         [
           cotizacionId, productoId, tintasId, carasId,
-          bk, foil, asaSuaje, altoRel, laminado, uvBr, pigmentos, pantones,
+          bk, foil, idsuaje, altoRel, laminado, uvBr, pigmentos, pantones,
           observacion,
         ]
       );
 
       const cotizacionProductoId = prodRows[0].idcotizacion_producto;
 
+      // ── Insertar cotizacion_detalle (una fila por cantidad) ──
       for (const d of detallesValidos) {
         await client.query(
           `INSERT INTO cotizacion_detalle (
             cotizacion_producto_id, cantidad, precio_total, aprobado
           )
-          VALUES ($1,$2,$3,$4)`,
+          VALUES ($1, $2, $3, $4)`,
           [cotizacionProductoId, d.cantidad, d.precio_total, null]
         );
       }
@@ -146,20 +158,45 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           c.clientes_idclientes,
           c.estado_administrativo_cat_idestado_administrativo_cat,
 
-          cli.razon_social AS cliente_nombre,
-          cli.empresa      AS cliente_empresa,
-          cli.telefono     AS cliente_telefono,
-          cli.correo       AS cliente_correo,
+          cli.razon_social  AS cliente_nombre,
+          cli.empresa       AS cliente_empresa,
+          cli.telefono      AS cliente_telefono,
+          cli.correo        AS cliente_correo,
+          cli.impresion     AS cliente_impresion,
 
-          est.nombre AS estado_nombre,
+          est.nombre        AS estado_nombre,
 
           cp.idcotizacion_producto,
           cp.configuracion_plastico_idconfiguracion_plastico,
           cp.tintas_idtintas,
           cp.caras_idcaras,
-          cp.bk, cp.foil, cp.asa_suaje, cp.alto_rel,
-          cp.laminado, cp.uv_br, cp.pigmentos, cp.pantones,
+          cp.bk,
+          cp.foil,
+          cp.idsuaje,
+          cp.alto_rel,
+          cp.laminado,
+          cp.uv_br,
+          cp.pigmentos,
+          cp.pantones,
           cp.observacion,
+
+          -- 🔥 JOIN con asa_suaje para obtener el texto del tipo de suaje
+          asz.tipo          AS suaje_tipo,
+
+          cfg.medida                AS cfg_medida,
+          cfg.altura                AS cfg_altura,
+          cfg.ancho                 AS cfg_ancho,
+          cfg.fuelle_fondo          AS cfg_fuelle_fondo,
+          cfg.fuelle_latIz          AS cfg_fuelle_lat_iz,
+          cfg.fuelle_latDe          AS cfg_fuelle_lat_de,
+          cfg.refuerzo              AS cfg_refuerzo,
+
+          tpp.material_plastico_producto  AS tipo_producto_nombre,
+          mp.tipo_material                AS material_nombre,
+          cal.calibre                     AS calibre_numero,
+
+          t.cantidad                AS tintas_cantidad,
+          car.cantidad              AS caras_cantidad,
 
           cd.idcotizacion_detalle,
           cd.cantidad,
@@ -178,6 +215,31 @@ export const getCotizaciones = async (req: Request, res: Response) => {
       LEFT JOIN cotizacion_producto cp
           ON cp.cotizacion_idcotizacion = c.idcotizacion
 
+      -- 🔥 JOIN con asa_suaje usando la FK idsuaje de cotizacion_producto
+      LEFT JOIN asa_suaje asz
+          ON asz.idsuaje = cp.idsuaje
+
+      LEFT JOIN configuracion_plastico cfg
+          ON cfg.idconfiguracion_plastico
+           = cp.configuracion_plastico_idconfiguracion_plastico
+
+      LEFT JOIN tipo_producto_plastico tpp
+          ON tpp.idtipo_producto_plastico
+           = cfg.tipo_producto_plastico_plastico_idtipo_producto_plastico
+
+      LEFT JOIN material_plastico mp
+          ON mp.idmaterial_plastico
+           = cfg.material_plastico_plastico_idmaterial_plastico
+
+      LEFT JOIN calibre cal
+          ON cal.idcalibre = cfg.calibre_idcalibre
+
+      LEFT JOIN tintas t
+          ON t.idtintas = cp.tintas_idtintas
+
+      LEFT JOIN caras car
+          ON car.idcaras = cp.caras_idcaras
+
       LEFT JOIN cotizacion_detalle cd
           ON cd.cotizacion_producto_id = cp.idcotizacion_producto
 
@@ -194,12 +256,12 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           no_cotizacion: noCot,
           fecha:         row.fecha,
           estado_id:     row.estado_administrativo_cat_idestado_administrativo_cat,
-          // 🔥 Nombre normalizado para el frontend
           estado:        normalizarNombreEstado(row.estado_nombre || ""),
           cliente_id:    row.clientes_idclientes,
           cliente:       row.cliente_nombre   || "",
           telefono:      row.cliente_telefono || "",
           correo:        row.cliente_correo   || "",
+          impresion:     row.cliente_impresion || null,
           empresa:       row.cliente_empresa  || "",
           productos:     [],
           total:         0,
@@ -212,24 +274,47 @@ export const getCotizaciones = async (req: Request, res: Response) => {
         );
 
         if (!producto) {
+          const tipoNombre = row.tipo_producto_nombre || "";
+          const medida     = row.cfg_medida           || "";
+          const material   = (row.material_nombre     || "").toLowerCase();
+          const nombreCompleto =
+            [tipoNombre, medida, material].filter(Boolean).join(" ") ||
+            `Producto #${row.configuracion_plastico_idconfiguracion_plastico}`;
+
+          const medidas = {
+            altura:         row.cfg_altura        ? String(row.cfg_altura)        : "",
+            ancho:          row.cfg_ancho         ? String(row.cfg_ancho)         : "",
+            fuelleFondo:    row.cfg_fuelle_fondo  ? String(row.cfg_fuelle_fondo)  : "",
+            fuelleLateral1: row.cfg_fuelle_lat_iz ? String(row.cfg_fuelle_lat_iz) : "",
+            fuelleLateral2: row.cfg_fuelle_lat_de ? String(row.cfg_fuelle_lat_de) : "",
+            refuerzo:       row.cfg_refuerzo      ? String(row.cfg_refuerzo)      : "",
+            solapa:         "",
+          };
+
           producto = {
             idcotizacion:          row.idcotizacion,
             idcotizacion_producto: row.idcotizacion_producto,
-            producto_id:  row.configuracion_plastico_idconfiguracion_plastico,
-            nombre:       `Producto #${row.configuracion_plastico_idconfiguracion_plastico}`,
-            tintas:       row.tintas_idtintas,
-            caras:        row.caras_idcaras,
-            bk:           row.bk,
-            foil:         row.foil,
-            asa_suaje:    row.asa_suaje,
-            alto_rel:     row.alto_rel,
-            laminado:     row.laminado,
-            uv_br:        row.uv_br,
-            pigmentos:    row.pigmentos,
-            pantones:     row.pantones,
-            observacion:  row.observacion,
-            detalles:     [],
-            subtotal:     0,
+            producto_id:           row.configuracion_plastico_idconfiguracion_plastico,
+            nombre:                nombreCompleto,
+            material:              row.material_nombre || "",
+            calibre:               String(row.calibre_numero || ""),
+            medidasFormateadas:    row.cfg_medida       || "",
+            medidas,
+            tintas:                row.tintas_cantidad ?? row.tintas_idtintas,
+            caras:                 row.caras_cantidad  ?? row.caras_idcaras,
+            bk:                    row.bk,
+            foil:                  row.foil,
+            // 🔥 idsuaje = FK integer, asa_suaje = texto del tipo para UI/PDF
+            idsuaje:               row.idsuaje   ?? null,
+            asa_suaje:             row.suaje_tipo ?? null,
+            alto_rel:              row.alto_rel,
+            laminado:              row.laminado,
+            uv_br:                 row.uv_br,
+            pigmentos:             row.pigmentos,
+            pantones:              row.pantones,
+            observacion:           row.observacion,
+            detalles:              [],
+            subtotal:              0,
           };
           agrupadas[noCot].productos.push(producto);
         }
@@ -289,6 +374,7 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
 
     console.log(`✅ Estado cotización #${id} → estadoId ${estadoId}`);
     return res.json({ message: "Estado actualizado exitosamente" });
+
   } catch (error: any) {
     console.error("❌ ACTUALIZAR ESTADO ERROR:", error.message);
     return res.status(500).json({ error: "Error al actualizar estado" });

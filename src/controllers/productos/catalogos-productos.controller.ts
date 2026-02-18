@@ -62,16 +62,16 @@ export const getCalibres = async (req: Request, res: Response) => {
     let query = "";
 
     if (tipo === "bopp") {
-      // Solo calibres BOPP (filtrar los que tienen valor en calibre_bopp)
-      query = `
-        SELECT 
-          idcalibre as id,
-          calibre_bopp as valor
-        FROM calibre
-        WHERE calibre_bopp IS NOT NULL
-        ORDER BY calibre_bopp ASC
-      `;
-    } else {
+  query = `
+    SELECT 
+      idcalibre as id,
+      calibre_bopp as valor,
+      gramos
+    FROM calibre
+    WHERE calibre_bopp IS NOT NULL
+    ORDER BY calibre_bopp ASC
+  `;
+}else {
       // Calibres normales (query existente)
       query = `
         SELECT 
