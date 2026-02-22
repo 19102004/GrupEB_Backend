@@ -11,7 +11,6 @@ interface TarifaProduccion {
   caras_idcaras: number;
   precio: number;
   merma_porcentaje: number;
-  // Datos del catálogo kilogramos
   kg: number;
   kg_min: number | null;
   kg_max: number | null;
@@ -44,7 +43,7 @@ const buscarTarifa = (
       t.tintas_idtintas === tintasId &&
       t.caras_idcaras === carasId &&
       pesoTotalKg >= (t.kg_min ?? 0) &&
-      (t.kg_max === null || pesoTotalKg < t.kg_max)
+      (t.kg_max === null || pesoTotalKg <= t.kg_max) // ✅ FIX: <= para incluir el límite exacto (ej: 30 kg)
   );
 
   if (!tarifa) {
