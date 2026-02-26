@@ -13,10 +13,13 @@ import clientesRoutes from "./routes/clientes/clientes.routes";
 import tarifasRoutes from "./routes/tarifas/tarifas.routes";
 import catalogosProductosRoutes from "./routes/productos/catalogos-productos.routes";
 import productosPlasticoRoutes from "./routes/productos/productos-plastico.routes";
-import catalogosProduccionRoutes from "./routes/catalogos_produccion/catalogos-produccion.routes"; // ✅ NUEVO
-import cotizacionesRoutes from "./routes/cotizaciones/cotizaciones.routes"; // ✅ NUEVO
-import calcularPrecioRoutes from "./routes/cotizaciones/calcular-precio.routes"; // ✅ NUEVO
-import suajesRoutes from "./routes/suajes/suajes.routes";
+import catalogosProduccionRoutes from "./routes/catalogos_produccion/catalogos-produccion.routes";
+import cotizacionesRoutes from "./routes/cotizaciones/cotizaciones.routes";
+import calcularPrecioRoutes from "./routes/cotizaciones/calcular-precio.routes";
+import pedidosRoutes from "./routes/pedidos/pedidos.routes";
+import ventasRoutes  from "./routes/ventas/ventas.routes";
+import disenoRoutes  from "./routes/diseno/diseno.routes";
+import suajesRoutes  from "./routes/suajes/suajes.routes";
 
 const app = express();
 
@@ -45,10 +48,13 @@ app.use("/api/clientes", clientesRoutes);
 app.use("/api/tarifas", tarifasRoutes);
 app.use("/api/catalogos-productos", catalogosProductosRoutes);
 app.use("/api/productos-plastico", productosPlasticoRoutes);
-app.use("/api/catalogos-produccion", catalogosProduccionRoutes); // ✅ NUEVO
-app.use("/api/cotizaciones", cotizacionesRoutes); // ✅ NUEVO
-app.use("/api", calcularPrecioRoutes); // ✅ NUEVO
-app.use("/api", suajesRoutes); // ✅ NUEVO
+app.use("/api/catalogos-produccion", catalogosProduccionRoutes);
+app.use("/api/cotizaciones", cotizacionesRoutes);
+app.use("/api/pedidos", pedidosRoutes);
+app.use("/api/ventas",  ventasRoutes);
+app.use("/api/diseno",  disenoRoutes);
+app.use("/api", calcularPrecioRoutes);
+app.use("/api", suajesRoutes);
 
 // ==========================
 // HEALTH CHECK

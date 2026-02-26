@@ -8,6 +8,11 @@ const ESTADO = {
   RECHAZADO:  4,
 } as const;
 
+const IVA                 = 0.16;
+const ANTICIPO_PORCENTAJE = 0.50;
+
+type TipoDocumento = "cotizacion" | "pedido";
+
 function normalizarNombreEstado(nombre: string): string {
   if (!nombre) return "Pendiente";
   const n = nombre.toLowerCase().trim();
@@ -16,48 +21,114 @@ function normalizarNombreEstado(nombre: string): string {
   return "Pendiente";
 }
 
+async function obtenerSiguienteNoPedido(client: any): Promise<number> {
+  const { rows } = await client.query(
+    `SELECT COALESCE(MAX(no_pedido), 0) + 1 AS siguiente FROM solicitud`
+  );
+  return rows[0].siguiente;
+}
+
 // ============================================================
-// CREAR COTIZACIÓN
+// HELPER: Crear venta + diseño al convertir a pedido
+// ============================================================
+async function crearVentaYDiseno(
+  client:      any,
+  solicitudId: number,
+  noPedido:    number,
+  subtotal:    number
+): Promise<void> {
+  const iva      = Number((subtotal * IVA).toFixed(2));
+  const total    = Number((subtotal + iva).toFixed(2));
+  const anticipo = Number((total * ANTICIPO_PORCENTAJE).toFixed(2));
+
+  // 1️⃣ Venta
+  const { rows: ventaRows } = await client.query(
+    `INSERT INTO ventas (
+      solicitud_idsolicitud,
+      estado_administrativo_cat_idestado_administrativo_cat,
+      subtotal, iva, total, anticipo, saldo, abono,
+      fecha_creacion
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    RETURNING idventas`,
+    [solicitudId, ESTADO.PENDIENTE, subtotal, iva, total, anticipo, total, 0]
+  );
+  console.log(`✅ Venta creada: idventas=${ventaRows[0].idventas} para pedido #${noPedido}`);
+
+  // 2️⃣ Cabecera de diseño
+  const { rows: disenoRows } = await client.query(
+    `INSERT INTO diseno (
+      solicitud_idsolicitud,
+      estado_administrativo_cat_idestado_administrativo_cat,
+      estado_diseno, fecha
+    ) VALUES ($1, $2, $3, NOW())
+    RETURNING iddiseno`,
+    [solicitudId, ESTADO.PENDIENTE, "Pendiente"]
+  );
+  const disenoId = disenoRows[0].iddiseno;
+
+  // 3️⃣ Un registro en diseno_producto por cada producto del pedido
+  const { rows: productos } = await client.query(
+    `SELECT idsolicitud_producto FROM solicitud_producto
+     WHERE solicitud_idsolicitud = $1`,
+    [solicitudId]
+  );
+
+  for (const prod of productos) {
+    await client.query(
+      `INSERT INTO diseno_producto (
+        diseno_iddiseno,
+        solicitud_producto_idsolicitud_producto,
+        estado_administrativo_cat_idestado_administrativo_cat,
+        fecha
+      ) VALUES ($1, $2, $3, NOW())`,
+      [disenoId, prod.idsolicitud_producto, ESTADO.PENDIENTE]
+    );
+  }
+
+  console.log(`✅ Diseño creado: iddiseno=${disenoId} con ${productos.length} productos`);
+}
+
+// ============================================================
+// CREAR COTIZACIÓN O PEDIDO DIRECTO
 // ============================================================
 export const crearCotizacion = async (req: Request, res: Response) => {
   const client = await pool.connect();
-
   try {
-    const { clienteId, productos } = req.body;
+    const { clienteId, productos, tipo = "cotizacion" } = req.body;
+    const tipoDocumento: TipoDocumento = tipo === "pedido" ? "pedido" : "cotizacion";
 
     if (!clienteId) return res.status(400).json({ error: "Se requiere clienteId" });
     if (!productos || productos.length === 0) return res.status(400).json({ error: "Se requiere al menos un producto" });
 
     await client.query("BEGIN");
 
-    const { rows: cotRows } = await client.query(
-      `INSERT INTO cotizacion (
+    let noPedido: number | null = null;
+    if (tipoDocumento === "pedido") {
+      noPedido = await obtenerSiguienteNoPedido(client);
+    }
+
+    const { rows: solRows } = await client.query(
+      `INSERT INTO solicitud (
         clientes_idclientes,
-        estado_administrativo_cat_idestado_administrativo_cat
-      ) VALUES ($1, $2)
-      RETURNING idcotizacion, no_cotizacion`,
-      [clienteId, ESTADO.PENDIENTE]
+        estado_administrativo_cat_idestado_administrativo_cat,
+        estado, no_pedido
+      ) VALUES ($1, $2, $3, $4)
+      RETURNING idsolicitud, no_cotizacion, no_pedido, estado`,
+      [clienteId, ESTADO.PENDIENTE, tipoDocumento, noPedido]
     );
 
-    const cotizacionId = cotRows[0].idcotizacion;
-    const noCotizacion = cotRows[0].no_cotizacion;
+    const solicitudId      = solRows[0].idsolicitud;
+    const noCotizacion     = solRows[0].no_cotizacion;
+    const noPedidoGuardado = solRows[0].no_pedido;
+
+    let subtotalTotal = 0;
 
     for (const producto of productos) {
       const {
-        productoId,
-        tintasId,
-        carasId,
-        detalles,
-        observacion = null,
-        bk          = null,
-        foil        = null,
-        idsuaje     = null,
-        altoRel     = null,
-        laminado    = null,
-        uvBr        = null,
-        pigmentos   = null,
-        pantones    = null,
-        porKilo     = null,
+        productoId, tintasId, carasId, detalles,
+        observacion = null, bk = null, foil = null,
+        idsuaje = null, altoRel = null, laminado = null,
+        uvBr = null, pigmentos = null, pantones = null, porKilo = null,
       } = producto;
 
       if (!productoId) {
@@ -74,37 +145,28 @@ export const crearCotizacion = async (req: Request, res: Response) => {
         return res.status(400).json({ error: `El producto ID ${productoId} no tiene cantidades válidas` });
       }
 
-      const pigmentosGuardar = typeof pigmentos === "string" && pigmentos.trim() !== ""
-        ? pigmentos.trim() : null;
-      const pantonesGuardar  = typeof pantones  === "string" && pantones.trim()  !== ""
-        ? pantones.trim()  : null;
+      const pigmentosGuardar = typeof pigmentos === "string" && pigmentos.trim() !== "" ? pigmentos.trim() : null;
+      const pantonesGuardar  = typeof pantones  === "string" && pantones.trim()  !== "" ? pantones.trim()  : null;
 
-      // ✅ cotizacion_producto ya NO tiene modo_cantidad
       const { rows: prodRows } = await client.query(
-        `INSERT INTO cotizacion_producto (
-          cotizacion_idcotizacion,
+        `INSERT INTO solicitud_producto (
+          solicitud_idsolicitud,
           configuracion_plastico_idconfiguracion_plastico,
-          tintas_idtintas,
-          caras_idcaras,
+          tintas_idtintas, caras_idcaras,
           bk, foil, idsuaje, alto_rel, laminado, uv_br,
           pigmentos, pantones, observacion
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        RETURNING idcotizacion_producto`,
-        [
-          cotizacionId, productoId, tintasId, carasId,
-          bk, foil, idsuaje, altoRel, laminado, uvBr,
-          pigmentosGuardar, pantonesGuardar, observacion,
-        ]
+        RETURNING idsolicitud_producto`,
+        [solicitudId, productoId, tintasId, carasId,
+         bk, foil, idsuaje, altoRel, laminado, uvBr,
+         pigmentosGuardar, pantonesGuardar, observacion]
       );
 
-      const cotizacionProductoId = prodRows[0].idcotizacion_producto;
+      const solicitudProductoId = prodRows[0].idsolicitud_producto;
       const porKiloNum = porKilo ? Number(porKilo) : 0;
 
       for (const d of detallesValidos) {
-        // ✅ modo_cantidad viene en cada detalle individual
         const modoDetalle = d.modo_cantidad === "kilo" ? "kilo" : "unidad";
-
-        // ✅ Calcular kilogramos siempre
         let kilogramos: number | null = null;
         if (porKiloNum > 0) {
           if (modoDetalle === "kilo" && d.kilogramos_ingresados) {
@@ -115,25 +177,42 @@ export const crearCotizacion = async (req: Request, res: Response) => {
         }
 
         await client.query(
-          `INSERT INTO cotizacion_detalle (
-            cotizacion_producto_id, cantidad, precio_total, aprobado,
+          `INSERT INTO solicitud_detalle (
+            solicitud_producto_id, cantidad, precio_total, aprobado,
             kilogramos, modo_cantidad
           ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [cotizacionProductoId, d.cantidad, d.precio_total, null, kilogramos, modoDetalle]
+          [solicitudProductoId, d.cantidad, d.precio_total, null, kilogramos, modoDetalle]
         );
+
+        subtotalTotal += Number(d.precio_total);
       }
     }
 
+    // ✅ Pedido directo → crear venta y diseño automáticamente
+    if (tipoDocumento === "pedido") {
+      await crearVentaYDiseno(client, solicitudId, noPedidoGuardado, subtotalTotal);
+    }
+
     await client.query("COMMIT");
+
+    if (tipoDocumento === "pedido") {
+      return res.status(201).json({
+        message:   "Pedido creado exitosamente",
+        no_pedido: noPedidoGuardado,
+        tipo:      "pedido",
+      });
+    }
+
     return res.status(201).json({
       message:       "Cotización creada exitosamente",
       no_cotizacion: noCotizacion,
+      tipo:          "cotizacion",
     });
 
   } catch (error: any) {
     await client.query("ROLLBACK");
-    console.error("❌ CREAR COTIZACIÓN ERROR:", error.message);
-    return res.status(500).json({ error: "Error al crear cotización" });
+    console.error("❌ CREAR ERROR:", error.message);
+    return res.status(500).json({ error: "Error al crear el documento" });
   } finally {
     client.release();
   }
@@ -146,11 +225,13 @@ export const getCotizaciones = async (req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-          c.idcotizacion,
-          c.no_cotizacion,
-          c.fecha,
-          c.clientes_idclientes,
-          c.estado_administrativo_cat_idestado_administrativo_cat,
+          s.idsolicitud,
+          s.no_cotizacion,
+          s.no_pedido,
+          s.estado          AS tipo_documento,
+          s.fecha,
+          s.clientes_idclientes,
+          s.estado_administrativo_cat_idestado_administrativo_cat,
 
           cli.razon_social  AS cliente_nombre,
           cli.empresa       AS cliente_empresa,
@@ -160,59 +241,50 @@ export const getCotizaciones = async (req: Request, res: Response) => {
 
           est.nombre        AS estado_nombre,
 
-          cp.idcotizacion_producto,
-          cp.configuracion_plastico_idconfiguracion_plastico,
-          cp.tintas_idtintas,
-          cp.caras_idcaras,
-          cp.bk,
-          cp.foil,
-          cp.idsuaje,
-          cp.alto_rel,
-          cp.laminado,
-          cp.uv_br,
-          cp.pigmentos,
-          cp.pantones,
-          cp.observacion,
+          sp.idsolicitud_producto,
+          sp.configuracion_plastico_idconfiguracion_plastico,
+          sp.tintas_idtintas,
+          sp.caras_idcaras,
+          sp.bk, sp.foil, sp.idsuaje, sp.alto_rel,
+          sp.laminado, sp.uv_br, sp.pigmentos, sp.pantones, sp.observacion,
 
           asz.tipo          AS suaje_tipo,
 
-          cfg.medida                AS cfg_medida,
-          cfg.altura                AS cfg_altura,
-          cfg.ancho                 AS cfg_ancho,
-          cfg.fuelle_fondo          AS cfg_fuelle_fondo,
-          cfg.fuelle_latIz          AS cfg_fuelle_lat_iz,
-          cfg.fuelle_latDe          AS cfg_fuelle_lat_de,
-          cfg.refuerzo              AS cfg_refuerzo,
-          cfg.por_kilo              AS cfg_por_kilo,
+          cfg.medida        AS cfg_medida,
+          cfg.altura        AS cfg_altura,
+          cfg.ancho         AS cfg_ancho,
+          cfg.fuelle_fondo  AS cfg_fuelle_fondo,
+          cfg.fuelle_latIz  AS cfg_fuelle_lat_iz,
+          cfg.fuelle_latDe  AS cfg_fuelle_lat_de,
+          cfg.refuerzo      AS cfg_refuerzo,
+          cfg.por_kilo      AS cfg_por_kilo,
 
-          tpp.material_plastico_producto  AS tipo_producto_nombre,
-          mp.tipo_material                AS material_nombre,
-          cal.calibre                     AS calibre_numero,
-          cal.calibre_bopp                AS calibre_bopp,
+          tpp.material_plastico_producto AS tipo_producto_nombre,
+          mp.tipo_material               AS material_nombre,
+          cal.calibre                    AS calibre_numero,
+          cal.calibre_bopp               AS calibre_bopp,
 
-          t.cantidad   AS tintas_cantidad,
-          car.cantidad AS caras_cantidad,
+          t.cantidad        AS tintas_cantidad,
+          car.cantidad      AS caras_cantidad,
 
-          cd.idcotizacion_detalle,
-          cd.cantidad,
-          cd.precio_total,
-          cd.aprobado,
-          cd.kilogramos,
-          -- ✅ modo_cantidad ahora vive en cotizacion_detalle
-          cd.modo_cantidad
+          sd.idsolicitud_detalle,
+          sd.cantidad,
+          sd.precio_total,
+          sd.aprobado,
+          sd.kilogramos,
+          sd.modo_cantidad
 
-      FROM cotizacion c
-
+      FROM solicitud s
       LEFT JOIN clientes cli
-          ON cli.idclientes = c.clientes_idclientes
+          ON cli.idclientes = s.clientes_idclientes
       LEFT JOIN estado_administrativo_cat est
-          ON est.idestado_administrativo_cat = c.estado_administrativo_cat_idestado_administrativo_cat
-      LEFT JOIN cotizacion_producto cp
-          ON cp.cotizacion_idcotizacion = c.idcotizacion
+          ON est.idestado_administrativo_cat = s.estado_administrativo_cat_idestado_administrativo_cat
+      LEFT JOIN solicitud_producto sp
+          ON sp.solicitud_idsolicitud = s.idsolicitud
       LEFT JOIN asa_suaje asz
-          ON asz.idsuaje = cp.idsuaje
+          ON asz.idsuaje = sp.idsuaje
       LEFT JOIN configuracion_plastico cfg
-          ON cfg.idconfiguracion_plastico = cp.configuracion_plastico_idconfiguracion_plastico
+          ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
       LEFT JOIN tipo_producto_plastico tpp
           ON tpp.idtipo_producto_plastico = cfg.tipo_producto_plastico_plastico_idtipo_producto_plastico
       LEFT JOIN material_plastico mp
@@ -220,13 +292,14 @@ export const getCotizaciones = async (req: Request, res: Response) => {
       LEFT JOIN calibre cal
           ON cal.idcalibre = cfg.calibre_idcalibre
       LEFT JOIN tintas t
-          ON t.idtintas = cp.tintas_idtintas
+          ON t.idtintas = sp.tintas_idtintas
       LEFT JOIN caras car
-          ON car.idcaras = cp.caras_idcaras
-      LEFT JOIN cotizacion_detalle cd
-          ON cd.cotizacion_producto_id = cp.idcotizacion_producto
+          ON car.idcaras = sp.caras_idcaras
+      LEFT JOIN solicitud_detalle sd
+          ON sd.solicitud_producto_id = sp.idsolicitud_producto
 
-      ORDER BY c.no_cotizacion DESC, cp.idcotizacion_producto, cd.idcotizacion_detalle
+      WHERE s.no_cotizacion IS NOT NULL
+      ORDER BY s.no_cotizacion DESC, sp.idsolicitud_producto, sd.idsolicitud_detalle
     `);
 
     const agrupadas: Record<number, any> = {};
@@ -236,24 +309,26 @@ export const getCotizaciones = async (req: Request, res: Response) => {
 
       if (!agrupadas[noCot]) {
         agrupadas[noCot] = {
-          no_cotizacion: noCot,
-          fecha:         row.fecha,
-          estado_id:     row.estado_administrativo_cat_idestado_administrativo_cat,
-          estado:        normalizarNombreEstado(row.estado_nombre || ""),
-          cliente_id:    row.clientes_idclientes,
-          cliente:       row.cliente_nombre   || "",
-          telefono:      row.cliente_telefono || "",
-          correo:        row.cliente_correo   || "",
-          impresion:     row.cliente_impresion || null,
-          empresa:       row.cliente_empresa  || "",
-          productos:     [],
-          total:         0,
+          no_cotizacion:  noCot,
+          no_pedido:      row.no_pedido ?? null,
+          tipo_documento: row.tipo_documento ?? "cotizacion",
+          fecha:          row.fecha,
+          estado_id:      row.estado_administrativo_cat_idestado_administrativo_cat,
+          estado:         normalizarNombreEstado(row.estado_nombre || ""),
+          cliente_id:     row.clientes_idclientes,
+          cliente:        row.cliente_nombre    || "",
+          telefono:       row.cliente_telefono  || "",
+          correo:         row.cliente_correo    || "",
+          impresion:      row.cliente_impresion || null,
+          empresa:        row.cliente_empresa   || "",
+          productos:      [],
+          total:          0,
         };
       }
 
-      if (row.idcotizacion_producto) {
+      if (row.idsolicitud_producto) {
         let producto = agrupadas[noCot].productos.find(
-          (p: any) => p.idcotizacion_producto === row.idcotizacion_producto
+          (p: any) => p.idsolicitud_producto === row.idsolicitud_producto
         );
 
         if (!producto) {
@@ -291,8 +366,9 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           })();
 
           producto = {
-            idcotizacion:          row.idcotizacion,
-            idcotizacion_producto: row.idcotizacion_producto,
+            idsolicitud:           row.idsolicitud,
+            idsolicitud_producto:  row.idsolicitud_producto,
+            idcotizacion_producto: row.idsolicitud_producto, // alias compatibilidad frontend
             producto_id:           row.configuracion_plastico_idconfiguracion_plastico,
             nombre:                nombreCompleto,
             material:              row.material_nombre || "",
@@ -321,14 +397,13 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           agrupadas[noCot].productos.push(producto);
         }
 
-        if (row.idcotizacion_detalle) {
+        if (row.idsolicitud_detalle) {
           producto.detalles.push({
-            iddetalle:    row.idcotizacion_detalle,
-            cantidad:     Number(row.cantidad),
-            precio_total: Number(row.precio_total),
-            aprobado:     row.aprobado,
-            kilogramos:   row.kilogramos  != null ? Number(row.kilogramos)  : null,
-            // ✅ modo_cantidad por detalle
+            iddetalle:     row.idsolicitud_detalle,
+            cantidad:      Number(row.cantidad),
+            precio_total:  Number(row.precio_total),
+            aprobado:      row.aprobado,
+            kilogramos:    row.kilogramos != null ? Number(row.kilogramos) : null,
             modo_cantidad: row.modo_cantidad || "unidad",
           });
           producto.subtotal += Number(row.precio_total);
@@ -353,33 +428,104 @@ export const getCotizaciones = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// ACTUALIZAR ESTADO
+// ACTUALIZAR ESTADO — convierte a pedido si se aprueba
 // ============================================================
 export const actualizarEstadoCotizacion = async (req: Request, res: Response) => {
+  const client = await pool.connect();
   try {
     const { id }       = req.params;
     const { estadoId } = req.body;
 
     if (!estadoId) return res.status(400).json({ error: "Se requiere estadoId" });
 
-    const { rowCount } = await pool.query(
-      `UPDATE cotizacion
-       SET estado_administrativo_cat_idestado_administrativo_cat = $1
-       WHERE no_cotizacion = $2`,
-      [estadoId, id]
+    await client.query("BEGIN");
+
+    const { rows: docRows } = await client.query(
+      `SELECT idsolicitud, estado, no_pedido FROM solicitud WHERE no_cotizacion = $1`,
+      [id]
     );
 
-    if (!rowCount || rowCount === 0) return res.status(404).json({ error: "Cotización no encontrada" });
-    return res.json({ message: "Estado actualizado exitosamente" });
+    if (docRows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Cotización no encontrada" });
+    }
+
+    const doc = docRows[0];
+    let noPedidoAsignado: number | null = doc.no_pedido;
+    let seConvirtioAPedido = false;
+
+    if (Number(estadoId) === ESTADO.APROBADO && doc.estado === "cotizacion" && !doc.no_pedido) {
+      noPedidoAsignado   = await obtenerSiguienteNoPedido(client);
+      seConvirtioAPedido = true;
+
+      // Eliminar detalles no aprobados
+      await client.query(
+        `DELETE FROM solicitud_detalle
+         WHERE solicitud_producto_id IN (
+           SELECT idsolicitud_producto FROM solicitud_producto
+           WHERE solicitud_idsolicitud = $1
+         )
+         AND (aprobado IS NULL OR aprobado = false)`,
+        [doc.idsolicitud]
+      );
+
+      // Convertir a pedido
+      await client.query(
+        `UPDATE solicitud
+         SET estado_administrativo_cat_idestado_administrativo_cat = $1,
+             estado    = 'pedido',
+             no_pedido = $2
+         WHERE no_cotizacion = $3`,
+        [estadoId, noPedidoAsignado, id]
+      );
+
+      // Calcular subtotal de detalles sobrevivientes
+      const { rows: subtotalRows } = await client.query(
+        `SELECT COALESCE(SUM(sd.precio_total), 0) AS subtotal
+         FROM solicitud_detalle sd
+         JOIN solicitud_producto sp ON sp.idsolicitud_producto = sd.solicitud_producto_id
+         WHERE sp.solicitud_idsolicitud = $1`,
+        [doc.idsolicitud]
+      );
+
+      // ✅ Crear venta y diseño
+      await crearVentaYDiseno(
+        client,
+        doc.idsolicitud,
+        noPedidoAsignado,
+        Number(subtotalRows[0].subtotal)
+      );
+
+    } else {
+      await client.query(
+        `UPDATE solicitud
+         SET estado_administrativo_cat_idestado_administrativo_cat = $1
+         WHERE no_cotizacion = $2`,
+        [estadoId, id]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    return res.json({
+      message:             seConvirtioAPedido
+                             ? "Cotización aprobada y convertida a pedido exitosamente"
+                             : "Estado actualizado exitosamente",
+      convertida_a_pedido: seConvirtioAPedido,
+      no_pedido:           noPedidoAsignado,
+    });
 
   } catch (error: any) {
+    await client.query("ROLLBACK");
     console.error("❌ ACTUALIZAR ESTADO ERROR:", error.message);
     return res.status(500).json({ error: "Error al actualizar estado" });
+  } finally {
+    client.release();
   }
 };
 
 // ============================================================
-// ELIMINAR COTIZACIÓN
+// ELIMINAR COTIZACIÓN — cascade completo
 // ============================================================
 export const eliminarCotizacion = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -387,36 +533,36 @@ export const eliminarCotizacion = async (req: Request, res: Response) => {
     const { id } = req.params;
     await client.query("BEGIN");
 
-    const { rows: cotRows } = await client.query(
-      `SELECT idcotizacion FROM cotizacion WHERE no_cotizacion = $1`, [id]
+    const { rows: solRows } = await client.query(
+      `SELECT idsolicitud FROM solicitud WHERE no_cotizacion = $1`, [id]
     );
-    if (cotRows.length === 0) {
+    if (solRows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Cotización no encontrada" });
     }
 
-    const cotizacionIds: number[] = cotRows.map((r: any) => r.idcotizacion);
+    const solicitudIds: number[] = solRows.map((r: any) => r.idsolicitud);
 
     const { rows: prodRows } = await client.query(
-      `SELECT idcotizacion_producto FROM cotizacion_producto
-       WHERE cotizacion_idcotizacion = ANY($1::int[])`,
-      [cotizacionIds]
+      `SELECT idsolicitud_producto FROM solicitud_producto
+       WHERE solicitud_idsolicitud = ANY($1::int[])`,
+      [solicitudIds]
     );
 
-    const productoIds: number[] = prodRows.map((r: any) => r.idcotizacion_producto);
+    const productoIds: number[] = prodRows.map((r: any) => r.idsolicitud_producto);
 
     if (productoIds.length > 0) {
       await client.query(
-        `DELETE FROM cotizacion_detalle WHERE cotizacion_producto_id = ANY($1::int[])`,
+        `DELETE FROM solicitud_detalle WHERE solicitud_producto_id = ANY($1::int[])`,
         [productoIds]
       );
     }
 
     await client.query(
-      `DELETE FROM cotizacion_producto WHERE cotizacion_idcotizacion = ANY($1::int[])`,
-      [cotizacionIds]
+      `DELETE FROM solicitud_producto WHERE solicitud_idsolicitud = ANY($1::int[])`,
+      [solicitudIds]
     );
-    await client.query(`DELETE FROM cotizacion WHERE no_cotizacion = $1`, [id]);
+    await client.query(`DELETE FROM solicitud WHERE no_cotizacion = $1`, [id]);
 
     await client.query("COMMIT");
     return res.json({ message: "Cotización eliminada exitosamente" });
@@ -442,7 +588,7 @@ export const aprobarDetalle = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "El campo aprobado debe ser true o false" });
 
     const { rowCount } = await pool.query(
-      `UPDATE cotizacion_detalle SET aprobado = $1 WHERE idcotizacion_detalle = $2`,
+      `UPDATE solicitud_detalle SET aprobado = $1 WHERE idsolicitud_detalle = $2`,
       [aprobado, id]
     );
 
@@ -464,7 +610,7 @@ export const actualizarObservacion = async (req: Request, res: Response) => {
     const { observacion } = req.body;
 
     const { rowCount } = await pool.query(
-      `UPDATE cotizacion_producto SET observacion = $1 WHERE idcotizacion_producto = $2`,
+      `UPDATE solicitud_producto SET observacion = $1 WHERE idsolicitud_producto = $2`,
       [observacion || null, id]
     );
 
