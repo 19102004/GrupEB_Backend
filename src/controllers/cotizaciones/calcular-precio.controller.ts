@@ -38,17 +38,21 @@ const buscarTarifa = (
   carasId: number,
   pesoTotalKg: number
 ): TarifaProduccion | null => {
+  // ✅ Redondear a 2 decimales para eliminar ruido de punto flotante
+  const pesoRedondeado = Math.round(pesoTotalKg * 100) / 100;
+
   const tarifa = tarifas.find(
     (t) =>
       t.tintas_idtintas === tintasId &&
       t.caras_idcaras === carasId &&
-      pesoTotalKg >= (t.kg_min ?? 0) &&
-      (t.kg_max === null || pesoTotalKg <= t.kg_max) // ✅ FIX: <= para incluir el límite exacto (ej: 30 kg)
+      pesoRedondeado >= (t.kg_min ?? 0) &&
+      (t.kg_max === null || pesoRedondeado <= t.kg_max)
   );
 
   if (!tarifa) {
     console.warn("⚠️ No se encontró tarifa para:", {
       pesoTotalKg,
+      pesoRedondeado,
       tintasId,
       carasId,
     });
@@ -57,7 +61,6 @@ const buscarTarifa = (
 
   return tarifa;
 };
-
 // ============================================
 // CALCULAR PRECIO UNITARIO (BACKEND)
 // ============================================

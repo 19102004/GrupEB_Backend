@@ -6,7 +6,7 @@ const ESTADO = {
   EN_PROCESO:      2,
   APROBADO:        3,
   RECHAZADO:       4,
-  ANTICIPO_PAGADO: 5, // "Enviado" en el catálogo — lo reutilizamos
+  ANTICIPO_PAGADO: 2, // En proceso — estado cuando anticipo está cubierto
   PAGADO:          6,
 } as const;
 

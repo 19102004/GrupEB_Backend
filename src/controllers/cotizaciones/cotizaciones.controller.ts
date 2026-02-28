@@ -54,15 +54,15 @@ async function crearVentaYDiseno(
   );
   console.log(`✅ Venta creada: idventas=${ventaRows[0].idventas} para pedido #${noPedido}`);
 
-  // 2️⃣ Cabecera de diseño
+  // 2️⃣ Cabecera de diseño (sin estado_diseno)
   const { rows: disenoRows } = await client.query(
     `INSERT INTO diseno (
       solicitud_idsolicitud,
       estado_administrativo_cat_idestado_administrativo_cat,
-      estado_diseno, fecha
-    ) VALUES ($1, $2, $3, NOW())
+      fecha
+    ) VALUES ($1, $2, NOW())
     RETURNING iddiseno`,
-    [solicitudId, ESTADO.PENDIENTE, "Pendiente"]
+    [solicitudId, ESTADO.PENDIENTE]
   );
   const disenoId = disenoRows[0].iddiseno;
 
@@ -368,7 +368,7 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           producto = {
             idsolicitud:           row.idsolicitud,
             idsolicitud_producto:  row.idsolicitud_producto,
-            idcotizacion_producto: row.idsolicitud_producto, // alias compatibilidad frontend
+            idcotizacion_producto: row.idsolicitud_producto,
             producto_id:           row.configuracion_plastico_idconfiguracion_plastico,
             nombre:                nombreCompleto,
             material:              row.material_nombre || "",

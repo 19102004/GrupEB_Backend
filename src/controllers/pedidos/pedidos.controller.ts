@@ -9,9 +9,6 @@ function normalizarNombreEstado(nombre: string): string {
   return "Pendiente";
 }
 
-// ============================================================
-// OBTENER PEDIDOS
-// ============================================================
 export const getPedidos = async (req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(`
@@ -31,6 +28,9 @@ export const getPedidos = async (req: Request, res: Response) => {
           cli.impresion     AS cliente_impresion,
 
           est.nombre        AS estado_nombre,
+
+          -- Estado real de la cabecera del diseño
+          d.estado_administrativo_cat_idestado_administrativo_cat AS diseno_estado_id,
 
           sp.idsolicitud_producto,
           sp.configuracion_plastico_idconfiguracion_plastico,
@@ -70,6 +70,8 @@ export const getPedidos = async (req: Request, res: Response) => {
           ON cli.idclientes = s.clientes_idclientes
       LEFT JOIN estado_administrativo_cat est
           ON est.idestado_administrativo_cat = s.estado_administrativo_cat_idestado_administrativo_cat
+      LEFT JOIN diseno d
+          ON d.solicitud_idsolicitud = s.idsolicitud
       LEFT JOIN solicitud_producto sp
           ON sp.solicitud_idsolicitud = s.idsolicitud
       LEFT JOIN asa_suaje asz
@@ -102,20 +104,21 @@ export const getPedidos = async (req: Request, res: Response) => {
 
       if (!agrupados[noPedido]) {
         agrupados[noPedido] = {
-          no_pedido:     noPedido,
-          no_cotizacion: row.no_cotizacion ?? null,
-          es_directo:    row.no_cotizacion === null,
-          fecha:         row.fecha,
-          estado_id:     row.estado_administrativo_cat_idestado_administrativo_cat,
-          estado:        normalizarNombreEstado(row.estado_nombre || ""),
-          cliente_id:    row.clientes_idclientes,
-          cliente:       row.cliente_nombre    || "",
-          telefono:      row.cliente_telefono  || "",
-          correo:        row.cliente_correo    || "",
-          impresion:     row.cliente_impresion || null,
-          empresa:       row.cliente_empresa   || "",
-          productos:     [],
-          total:         0,
+          no_pedido:        noPedido,
+          no_cotizacion:    row.no_cotizacion ?? null,
+          es_directo:       row.no_cotizacion === null,
+          fecha:            row.fecha,
+          estado_id:        row.estado_administrativo_cat_idestado_administrativo_cat,
+          estado:           normalizarNombreEstado(row.estado_nombre || ""),
+          diseno_estado_id: row.diseno_estado_id ?? 1,  // estado real del diseño
+          cliente_id:       row.clientes_idclientes,
+          cliente:          row.cliente_nombre    || "",
+          telefono:         row.cliente_telefono  || "",
+          correo:           row.cliente_correo    || "",
+          impresion:        row.cliente_impresion || null,
+          empresa:          row.cliente_empresa   || "",
+          productos:        [],
+          total:            0,
         };
       }
 
@@ -161,7 +164,7 @@ export const getPedidos = async (req: Request, res: Response) => {
           producto = {
             idsolicitud:           row.idsolicitud,
             idsolicitud_producto:  row.idsolicitud_producto,
-            idcotizacion_producto: row.idsolicitud_producto, // alias compatibilidad frontend
+            idcotizacion_producto: row.idsolicitud_producto,
             producto_id:           row.configuracion_plastico_idconfiguracion_plastico,
             nombre:                nombreCompleto,
             material:              row.material_nombre || "",
@@ -220,57 +223,72 @@ export const getPedidos = async (req: Request, res: Response) => {
   }
 };
 
-// ============================================================
-// CANCELAR PEDIDO — cascade completo
-// Orden: detalle → producto → venta_pago → ventas
-//        → diseno_producto → diseno → solicitud
-// ============================================================
 export const eliminarPedido = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
-    const { id } = req.params; // no_pedido
-
-    await client.query("BEGIN");
+    const { id } = req.params;
 
     const { rows: pedRows } = await client.query(
-      `SELECT idsolicitud, no_cotizacion FROM solicitud WHERE no_pedido = $1`,
-      [id]
+      `SELECT idsolicitud, no_cotizacion FROM solicitud WHERE no_pedido = $1`, [id]
     );
-
-    if (pedRows.length === 0) {
-      await client.query("ROLLBACK");
+    if (pedRows.length === 0)
       return res.status(404).json({ error: "Pedido no encontrado" });
-    }
 
     const solicitudId: number       = pedRows[0].idsolicitud;
     const noCotizacion: number|null = pedRows[0].no_cotizacion;
 
-    // 1️⃣ IDs de productos
+    const { rows: pagosRows } = await client.query(
+      `SELECT COUNT(*) AS total FROM venta_pago vp
+       INNER JOIN ventas v ON v.idventas = vp.ventas_idventas
+       WHERE v.solicitud_idsolicitud = $1`, [solicitudId]
+    );
+    if (Number(pagosRows[0].total) > 0) {
+      return res.status(409).json({
+        error:   "No se puede eliminar este pedido porque tiene pagos registrados.",
+        motivo:  "pagos",
+        detalle: `El pedido #${id} tiene ${pagosRows[0].total} pago(s) registrado(s). ` +
+                 "Elimina los pagos desde el módulo de Anticipo y Liquidación antes de cancelar el pedido.",
+      });
+    }
+
+    const { rows: disenoRows } = await client.query(
+      `SELECT COUNT(*) AS total FROM diseno_producto dp
+       INNER JOIN diseno d ON d.iddiseno = dp.diseno_iddiseno
+       WHERE d.solicitud_idsolicitud = $1
+         AND dp.estado_administrativo_cat_idestado_administrativo_cat = 3`, [solicitudId]
+    );
+    if (Number(disenoRows[0].total) > 0) {
+      return res.status(409).json({
+        error:   "No se puede eliminar este pedido porque tiene productos aprobados en diseño.",
+        motivo:  "diseno",
+        detalle: `El pedido #${id} tiene ${disenoRows[0].total} producto(s) aprobado(s) en diseño. ` +
+                 "Restablece los productos en el módulo de Diseño antes de cancelar el pedido.",
+      });
+    }
+
+    await client.query("BEGIN");
+
     const { rows: prodRows } = await client.query(
-      `SELECT idsolicitud_producto FROM solicitud_producto
-       WHERE solicitud_idsolicitud = $1`,
-      [solicitudId]
+      `SELECT idsolicitud_producto FROM solicitud_producto WHERE solicitud_idsolicitud = $1`, [solicitudId]
     );
     const productoIds: number[] = prodRows.map((r: any) => r.idsolicitud_producto);
 
-    // 2️⃣ Detalles
     if (productoIds.length > 0) {
+      await client.query(
+        `DELETE FROM diseno_producto WHERE solicitud_producto_idsolicitud_producto = ANY($1::int[])`,
+        [productoIds]
+      );
       await client.query(
         `DELETE FROM solicitud_detalle WHERE solicitud_producto_id = ANY($1::int[])`,
         [productoIds]
       );
     }
 
-    // 3️⃣ Productos
-    await client.query(
-      `DELETE FROM solicitud_producto WHERE solicitud_idsolicitud = $1`,
-      [solicitudId]
-    );
+    await client.query(`DELETE FROM diseno WHERE solicitud_idsolicitud = $1`, [solicitudId]);
+    await client.query(`DELETE FROM solicitud_producto WHERE solicitud_idsolicitud = $1`, [solicitudId]);
 
-    // 4️⃣ Pagos y venta
     const { rows: ventaRows } = await client.query(
-      `SELECT idventas FROM ventas WHERE solicitud_idsolicitud = $1`,
-      [solicitudId]
+      `SELECT idventas FROM ventas WHERE solicitud_idsolicitud = $1`, [solicitudId]
     );
     if (ventaRows.length > 0) {
       const ventaId = ventaRows[0].idventas;
@@ -278,20 +296,7 @@ export const eliminarPedido = async (req: Request, res: Response) => {
       await client.query(`DELETE FROM ventas WHERE idventas = $1`, [ventaId]);
     }
 
-    // 5️⃣ Diseño por producto y diseño cabecera
-    const { rows: disenoRows } = await client.query(
-      `SELECT iddiseno FROM diseno WHERE solicitud_idsolicitud = $1`,
-      [solicitudId]
-    );
-    if (disenoRows.length > 0) {
-      const disenoId = disenoRows[0].iddiseno;
-      await client.query(`DELETE FROM diseno_producto WHERE diseno_iddiseno = $1`, [disenoId]);
-      await client.query(`DELETE FROM diseno WHERE iddiseno = $1`, [disenoId]);
-    }
-
-    // 6️⃣ Solicitud
     await client.query(`DELETE FROM solicitud WHERE idsolicitud = $1`, [solicitudId]);
-
     await client.query("COMMIT");
 
     return res.json({
@@ -304,7 +309,7 @@ export const eliminarPedido = async (req: Request, res: Response) => {
   } catch (error: any) {
     await client.query("ROLLBACK");
     console.error("❌ CANCELAR PEDIDO ERROR:", error.message);
-    return res.status(500).json({ error: "Error al cancelar pedido" });
+    return res.status(500).json({ error: "Error al cancelar pedido", detalle: error.message });
   } finally {
     client.release();
   }
