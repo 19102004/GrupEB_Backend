@@ -29,8 +29,14 @@ export const getPedidos = async (req: Request, res: Response) => {
 
           est.nombre        AS estado_nombre,
 
-          -- Estado real de la cabecera del diseño
-          d.estado_administrativo_cat_idestado_administrativo_cat AS diseno_estado_id,
+          -- ✅ FIX: subquery en lugar de JOIN para evitar multiplicación de filas
+          (
+            SELECT d.estado_administrativo_cat_idestado_administrativo_cat
+            FROM diseno d
+            WHERE d.solicitud_idsolicitud = s.idsolicitud
+            ORDER BY d.iddiseno DESC
+            LIMIT 1
+          ) AS diseno_estado_id,
 
           sp.idsolicitud_producto,
           sp.configuracion_plastico_idconfiguracion_plastico,
@@ -70,8 +76,6 @@ export const getPedidos = async (req: Request, res: Response) => {
           ON cli.idclientes = s.clientes_idclientes
       LEFT JOIN estado_administrativo_cat est
           ON est.idestado_administrativo_cat = s.estado_administrativo_cat_idestado_administrativo_cat
-      LEFT JOIN diseno d
-          ON d.solicitud_idsolicitud = s.idsolicitud
       LEFT JOIN solicitud_producto sp
           ON sp.solicitud_idsolicitud = s.idsolicitud
       LEFT JOIN asa_suaje asz
@@ -110,7 +114,7 @@ export const getPedidos = async (req: Request, res: Response) => {
           fecha:            row.fecha,
           estado_id:        row.estado_administrativo_cat_idestado_administrativo_cat,
           estado:           normalizarNombreEstado(row.estado_nombre || ""),
-          diseno_estado_id: row.diseno_estado_id ?? 1,  // estado real del diseño
+          diseno_estado_id: row.diseno_estado_id ?? 1,
           cliente_id:       row.clientes_idclientes,
           cliente:          row.cliente_nombre    || "",
           telefono:         row.cliente_telefono  || "",

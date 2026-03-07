@@ -28,9 +28,6 @@ async function obtenerSiguienteNoPedido(client: any): Promise<number> {
   return rows[0].siguiente;
 }
 
-// ============================================================
-// HELPER: Crear venta + diseño al convertir a pedido
-// ============================================================
 async function crearVentaYDiseno(
   client:      any,
   solicitudId: number,
@@ -41,7 +38,6 @@ async function crearVentaYDiseno(
   const total    = Number((subtotal + iva).toFixed(2));
   const anticipo = Number((total * ANTICIPO_PORCENTAJE).toFixed(2));
 
-  // 1️⃣ Venta
   const { rows: ventaRows } = await client.query(
     `INSERT INTO ventas (
       solicitud_idsolicitud,
@@ -54,7 +50,7 @@ async function crearVentaYDiseno(
   );
   console.log(`✅ Venta creada: idventas=${ventaRows[0].idventas} para pedido #${noPedido}`);
 
-  // 2️⃣ Cabecera de diseño (sin estado_diseno)
+  // ✅ FIX: 1 solo diseno por pedido
   const { rows: disenoRows } = await client.query(
     `INSERT INTO diseno (
       solicitud_idsolicitud,
@@ -66,7 +62,7 @@ async function crearVentaYDiseno(
   );
   const disenoId = disenoRows[0].iddiseno;
 
-  // 3️⃣ Un registro en diseno_producto por cada producto del pedido
+  // ✅ FIX: N diseno_producto apuntando al mismo diseno padre
   const { rows: productos } = await client.query(
     `SELECT idsolicitud_producto FROM solicitud_producto
      WHERE solicitud_idsolicitud = $1`,
@@ -85,7 +81,7 @@ async function crearVentaYDiseno(
     );
   }
 
-  console.log(`✅ Diseño creado: iddiseno=${disenoId} con ${productos.length} productos`);
+  console.log(`✅ Diseño #${disenoId} creado con ${productos.length} producto(s) para pedido #${noPedido}`);
 }
 
 // ============================================================
@@ -188,7 +184,6 @@ export const crearCotizacion = async (req: Request, res: Response) => {
       }
     }
 
-    // ✅ Pedido directo → crear venta y diseño automáticamente
     if (tipoDocumento === "pedido") {
       await crearVentaYDiseno(client, solicitudId, noPedidoGuardado, subtotalTotal);
     }
@@ -299,6 +294,15 @@ export const getCotizaciones = async (req: Request, res: Response) => {
           ON sd.solicitud_producto_id = sp.idsolicitud_producto
 
       WHERE s.no_cotizacion IS NOT NULL
+        AND (
+          s.estado = 'cotizacion'
+          OR (
+            s.estado = 'pedido'
+            AND s.visible_hasta IS NOT NULL
+            AND s.visible_hasta >= NOW()
+          )
+        )
+
       ORDER BY s.no_cotizacion DESC, sp.idsolicitud_producto, sd.idsolicitud_detalle
     `);
 
@@ -435,13 +439,14 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
   try {
     const { id }       = req.params;
     const { estadoId } = req.body;
-
     if (!estadoId) return res.status(400).json({ error: "Se requiere estadoId" });
 
     await client.query("BEGIN");
 
     const { rows: docRows } = await client.query(
-      `SELECT idsolicitud, estado, no_pedido FROM solicitud WHERE no_cotizacion = $1`,
+      `SELECT idsolicitud, estado, no_pedido 
+       FROM solicitud 
+       WHERE no_cotizacion = $1`,
       [id]
     );
 
@@ -458,37 +463,37 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
       noPedidoAsignado   = await obtenerSiguienteNoPedido(client);
       seConvirtioAPedido = true;
 
-      // Eliminar detalles no aprobados
       await client.query(
         `DELETE FROM solicitud_detalle
          WHERE solicitud_producto_id IN (
-           SELECT idsolicitud_producto FROM solicitud_producto
+           SELECT idsolicitud_producto 
+           FROM solicitud_producto
            WHERE solicitud_idsolicitud = $1
          )
          AND (aprobado IS NULL OR aprobado = false)`,
         [doc.idsolicitud]
       );
 
-      // Convertir a pedido
       await client.query(
         `UPDATE solicitud
          SET estado_administrativo_cat_idestado_administrativo_cat = $1,
-             estado    = 'pedido',
-             no_pedido = $2
+             estado = 'pedido',
+             no_pedido = $2,
+             fecha_aprobacion = NOW(),
+             visible_hasta = NOW() + INTERVAL '5 days'
          WHERE no_cotizacion = $3`,
         [estadoId, noPedidoAsignado, id]
       );
 
-      // Calcular subtotal de detalles sobrevivientes
       const { rows: subtotalRows } = await client.query(
         `SELECT COALESCE(SUM(sd.precio_total), 0) AS subtotal
          FROM solicitud_detalle sd
-         JOIN solicitud_producto sp ON sp.idsolicitud_producto = sd.solicitud_producto_id
+         JOIN solicitud_producto sp 
+           ON sp.idsolicitud_producto = sd.solicitud_producto_id
          WHERE sp.solicitud_idsolicitud = $1`,
         [doc.idsolicitud]
       );
 
-      // ✅ Crear venta y diseño
       await crearVentaYDiseno(
         client,
         doc.idsolicitud,
@@ -508,11 +513,11 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
     await client.query("COMMIT");
 
     return res.json({
-      message:             seConvirtioAPedido
-                             ? "Cotización aprobada y convertida a pedido exitosamente"
-                             : "Estado actualizado exitosamente",
+      message: seConvirtioAPedido
+        ? "Cotización aprobada y convertida a pedido exitosamente"
+        : "Estado actualizado exitosamente",
       convertida_a_pedido: seConvirtioAPedido,
-      no_pedido:           noPedidoAsignado,
+      no_pedido: noPedidoAsignado,
     });
 
   } catch (error: any) {
@@ -525,7 +530,7 @@ export const actualizarEstadoCotizacion = async (req: Request, res: Response) =>
 };
 
 // ============================================================
-// ELIMINAR COTIZACIÓN — cascade completo
+// ELIMINAR COTIZACIÓN
 // ============================================================
 export const eliminarCotizacion = async (req: Request, res: Response) => {
   const client = await pool.connect();

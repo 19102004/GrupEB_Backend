@@ -20,6 +20,8 @@ import pedidosRoutes from "./routes/pedidos/pedidos.routes";
 import ventasRoutes  from "./routes/ventas/ventas.routes";
 import disenoRoutes  from "./routes/diseno/diseno.routes";
 import suajesRoutes  from "./routes/suajes/suajes.routes";
+import seguimientoRoutes from "./routes/seguimiento/seguimiento.routes";
+import rodillosRoutes from "./routes/rodillos/rodillos.routes";
 
 const app = express();
 
@@ -55,6 +57,8 @@ app.use("/api/ventas",  ventasRoutes);
 app.use("/api/diseno",  disenoRoutes);
 app.use("/api", calcularPrecioRoutes);
 app.use("/api", suajesRoutes);
+app.use("/api/seguimiento", seguimientoRoutes);
+app.use("/api/rodillos", rodillosRoutes);
 
 // ==========================
 // HEALTH CHECK

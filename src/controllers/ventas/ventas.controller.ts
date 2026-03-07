@@ -6,13 +6,12 @@ const ESTADO = {
   EN_PROCESO:      2,
   APROBADO:        3,
   RECHAZADO:       4,
-  ANTICIPO_PAGADO: 2, // En proceso — estado cuando anticipo está cubierto
+  ANTICIPO_PAGADO: 2,
   PAGADO:          6,
 } as const;
 
 // ============================================================
 // OBTENER TODAS LAS VENTAS
-// Incluye info del pedido, cliente y resumen de pagos
 // ============================================================
 export const getVentas = async (req: Request, res: Response) => {
   try {
@@ -27,31 +26,24 @@ export const getVentas = async (req: Request, res: Response) => {
         v.saldo,
         v.abono,
         v.fecha_creacion,
+        v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
         est.nombre    AS estado_nombre,
-
         s.no_pedido,
         s.no_cotizacion,
         s.fecha       AS fecha_pedido,
-
         cli.razon_social AS cliente,
         cli.empresa,
         cli.telefono,
         cli.correo
-
       FROM ventas v
-      JOIN solicitud s
-          ON s.idsolicitud = v.solicitud_idsolicitud
-      JOIN clientes cli
-          ON cli.idclientes = s.clientes_idclientes
+      JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
+      JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
       JOIN estado_administrativo_cat est
           ON est.idestado_administrativo_cat = v.estado_administrativo_cat_idestado_administrativo_cat
-
       ORDER BY v.idventas DESC
     `);
-
     return res.json(rows);
-
   } catch (error: any) {
     console.error("❌ GET VENTAS ERROR:", error.message);
     return res.status(500).json({ error: "Error al obtener ventas" });
@@ -63,9 +55,8 @@ export const getVentas = async (req: Request, res: Response) => {
 // ============================================================
 export const getVentaById = async (req: Request, res: Response) => {
   try {
-    const { id } = req.params; // idventas
+    const { id } = req.params;
 
-    // Datos de la venta
     const { rows: ventaRows } = await pool.query(`
       SELECT
         v.idventas,
@@ -77,33 +68,27 @@ export const getVentaById = async (req: Request, res: Response) => {
         v.saldo,
         v.abono,
         v.fecha_creacion,
+        v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
         est.nombre    AS estado_nombre,
-
         s.no_pedido,
         s.no_cotizacion,
         s.fecha       AS fecha_pedido,
-
         cli.razon_social AS cliente,
         cli.empresa,
         cli.telefono,
         cli.correo
-
       FROM ventas v
-      JOIN solicitud s
-          ON s.idsolicitud = v.solicitud_idsolicitud
-      JOIN clientes cli
-          ON cli.idclientes = s.clientes_idclientes
+      JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
+      JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
       JOIN estado_administrativo_cat est
           ON est.idestado_administrativo_cat = v.estado_administrativo_cat_idestado_administrativo_cat
-
       WHERE v.idventas = $1
     `, [id]);
 
     if (ventaRows.length === 0)
       return res.status(404).json({ error: "Venta no encontrada" });
 
-    // Historial de pagos
     const { rows: pagos } = await pool.query(`
       SELECT
         vp.idventa_pago,
@@ -119,11 +104,7 @@ export const getVentaById = async (req: Request, res: Response) => {
       ORDER BY vp.fecha ASC
     `, [id]);
 
-    return res.json({
-      ...ventaRows[0],
-      pagos,
-    });
-
+    return res.json({ ...ventaRows[0], pagos });
   } catch (error: any) {
     console.error("❌ GET VENTA BY ID ERROR:", error.message);
     return res.status(500).json({ error: "Error al obtener venta" });
@@ -148,26 +129,21 @@ export const getVentaByPedido = async (req: Request, res: Response) => {
         v.saldo,
         v.abono,
         v.fecha_creacion,
+        v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
         est.nombre    AS estado_nombre,
-
         s.no_pedido,
         s.no_cotizacion,
         s.fecha       AS fecha_pedido,
-
         cli.razon_social AS cliente,
         cli.empresa,
         cli.telefono,
         cli.correo
-
       FROM ventas v
-      JOIN solicitud s
-          ON s.idsolicitud = v.solicitud_idsolicitud
-      JOIN clientes cli
-          ON cli.idclientes = s.clientes_idclientes
+      JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
+      JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
       JOIN estado_administrativo_cat est
           ON est.idestado_administrativo_cat = v.estado_administrativo_cat_idestado_administrativo_cat
-
       WHERE s.no_pedido = $1
     `, [noPedido]);
 
@@ -189,11 +165,7 @@ export const getVentaByPedido = async (req: Request, res: Response) => {
       ORDER BY vp.fecha ASC
     `, [ventaRows[0].idventas]);
 
-    return res.json({
-      ...ventaRows[0],
-      pagos,
-    });
-
+    return res.json({ ...ventaRows[0], pagos });
   } catch (error: any) {
     console.error("❌ GET VENTA BY PEDIDO ERROR:", error.message);
     return res.status(500).json({ error: "Error al obtener venta" });
@@ -202,23 +174,20 @@ export const getVentaByPedido = async (req: Request, res: Response) => {
 
 // ============================================================
 // REGISTRAR PAGO / ABONO
-// Actualiza abono acumulado, saldo y estado automáticamente
 // ============================================================
 export const registrarPago = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
-    const { id } = req.params; // idventas
-    const { metodoPagoId, monto, esAnticipo = false, observacion = null } = req.body;
+    const { id } = req.params;
+    const { metodoPagoId, monto, observacion = null } = req.body;
 
     if (!metodoPagoId) return res.status(400).json({ error: "Se requiere metodoPagoId" });
     if (!monto || Number(monto) <= 0) return res.status(400).json({ error: "El monto debe ser mayor a 0" });
 
     await client.query("BEGIN");
 
-    // Obtener venta actual
     const { rows: ventaRows } = await client.query(
-      `SELECT idventas, total, anticipo, saldo, abono
-       FROM ventas WHERE idventas = $1`,
+      `SELECT idventas, total, anticipo, saldo, abono FROM ventas WHERE idventas = $1`,
       [id]
     );
 
@@ -227,34 +196,46 @@ export const registrarPago = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    const venta       = ventaRows[0];
-    const montoNum    = Number(monto);
-    const nuevoAbono  = Number((Number(venta.abono) + montoNum).toFixed(2));
-    const nuevoSaldo  = Number((Number(venta.total) - nuevoAbono).toFixed(2));
+    const venta      = ventaRows[0];
+    const montoNum   = Number(monto);
+    const abonoAntes = Number(venta.abono);
+    const nuevoAbono = Number((abonoAntes + montoNum).toFixed(2));
+    const nuevoSaldo = Number((Number(venta.total) - nuevoAbono).toFixed(2));
+    const anticipo   = Number(venta.anticipo);
+
+    // es_anticipo = true SOLO cuando este pago cruza el umbral del anticipo
+    // (antes no estaba cubierto, después sí)
+    const anticipoCubierto = nuevoAbono >= anticipo;
+    const anticipoAntes    = abonoAntes < anticipo;
+    const esAnticipoReal   = anticipoAntes && anticipoCubierto;
+
+    // fecha_liquidacion se guarda SOLO cuando el saldo queda en 0
+    const esLiquidacion = nuevoSaldo <= 0;
 
     // Determinar nuevo estado
     let nuevoEstado: number = ESTADO.PENDIENTE;
     if (nuevoSaldo <= 0) {
       nuevoEstado = ESTADO.PAGADO;
-    } else if (nuevoAbono >= Number(venta.anticipo)) {
-      nuevoEstado = ESTADO.ANTICIPO_PAGADO; // "Enviado" en el catálogo
+    } else if (nuevoAbono >= anticipo) {
+      nuevoEstado = ESTADO.ANTICIPO_PAGADO;
     }
 
-    // 1️⃣ Insertar pago en historial
+    // 1️⃣ Insertar pago — es_anticipo calculado automáticamente por el backend
     await client.query(
       `INSERT INTO venta_pago (
         ventas_idventas, metodo_pago_idmetodo_pago,
         monto, es_anticipo, observacion, fecha
       ) VALUES ($1, $2, $3, $4, $5, NOW())`,
-      [id, metodoPagoId, montoNum, esAnticipo, observacion]
+      [id, metodoPagoId, montoNum, esAnticipoReal, observacion]
     );
 
-    // 2️⃣ Actualizar acumulados en ventas
+    // 2️⃣ Actualizar ventas — fecha_liquidacion solo si liquida el total
     await client.query(
       `UPDATE ventas
        SET abono  = $1,
            saldo  = $2,
            estado_administrativo_cat_idestado_administrativo_cat = $3
+           ${esLiquidacion ? ", fecha_liquidacion = NOW()" : ""}
        WHERE idventas = $4`,
       [nuevoAbono, nuevoSaldo, nuevoEstado, id]
     );
@@ -262,12 +243,14 @@ export const registrarPago = async (req: Request, res: Response) => {
     await client.query("COMMIT");
 
     return res.json({
-      message:      "Pago registrado exitosamente",
-      abono_total:  nuevoAbono,
-      saldo:        nuevoSaldo,
-      estado_id:    nuevoEstado,
-      pagado:       nuevoSaldo <= 0,
-      anticipo_cubierto: nuevoAbono >= Number(venta.anticipo),
+      message:           "Pago registrado exitosamente",
+      abono_total:       nuevoAbono,
+      saldo:             nuevoSaldo,
+      estado_id:         nuevoEstado,
+      pagado:            nuevoSaldo <= 0,
+      anticipo_cubierto: anticipoCubierto,
+      es_anticipo:       esAnticipoReal,
+      liquidado:         esLiquidacion,
     });
 
   } catch (error: any) {
@@ -280,17 +263,16 @@ export const registrarPago = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// ELIMINAR PAGO (solo el último si es necesario corregir)
-// Recalcula abono y saldo automáticamente
+// ELIMINAR PAGO
+// Recalcula abono, saldo, estado y fecha_liquidacion
 // ============================================================
 export const eliminarPago = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
-    const { id } = req.params; // idventa_pago
+    const { id } = req.params;
 
     await client.query("BEGIN");
 
-    // Obtener el pago
     const { rows: pagoRows } = await client.query(
       `SELECT idventa_pago, ventas_idventas, monto FROM venta_pago WHERE idventa_pago = $1`,
       [id]
@@ -301,29 +283,24 @@ export const eliminarPago = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Pago no encontrado" });
     }
 
-    const pago    = pagoRows[0];
-    const ventaId = pago.ventas_idventas;
+    const ventaId = pagoRows[0].ventas_idventas;
 
-    // Eliminar el pago
     await client.query(`DELETE FROM venta_pago WHERE idventa_pago = $1`, [id]);
 
-    // Recalcular abono total desde el historial
     const { rows: sumaRows } = await client.query(
-      `SELECT COALESCE(SUM(monto), 0) AS total_abonado
-       FROM venta_pago WHERE ventas_idventas = $1`,
+      `SELECT COALESCE(SUM(monto), 0) AS total_abonado FROM venta_pago WHERE ventas_idventas = $1`,
       [ventaId]
     );
 
     const nuevoAbono = Number(sumaRows[0].total_abonado);
 
-    // Obtener total y anticipo de la venta
     const { rows: ventaRows } = await client.query(
       `SELECT total, anticipo FROM ventas WHERE idventas = $1`,
       [ventaId]
     );
 
-    const total    = Number(ventaRows[0].total);
-    const anticipo = Number(ventaRows[0].anticipo);
+    const total      = Number(ventaRows[0].total);
+    const anticipo   = Number(ventaRows[0].anticipo);
     const nuevoSaldo = Number((total - nuevoAbono).toFixed(2));
 
     let nuevoEstado: number = ESTADO.PENDIENTE;
@@ -333,12 +310,17 @@ export const eliminarPago = async (req: Request, res: Response) => {
       nuevoEstado = ESTADO.ANTICIPO_PAGADO;
     }
 
+    // Si ya no está liquidado, limpiar fecha_liquidacion
+    const estaLiquidado = nuevoSaldo <= 0;
+
     await client.query(
       `UPDATE ventas
-       SET abono = $1, saldo = $2,
-           estado_administrativo_cat_idestado_administrativo_cat = $3
-       WHERE idventas = $4`,
-      [nuevoAbono, nuevoSaldo, nuevoEstado, ventaId]
+       SET abono = $1,
+           saldo = $2,
+           estado_administrativo_cat_idestado_administrativo_cat = $3,
+           fecha_liquidacion = $4
+       WHERE idventas = $5`,
+      [nuevoAbono, nuevoSaldo, nuevoEstado, estaLiquidado ? new Date() : null, ventaId]
     );
 
     await client.query("COMMIT");
@@ -348,6 +330,7 @@ export const eliminarPago = async (req: Request, res: Response) => {
       abono_total: nuevoAbono,
       saldo:       nuevoSaldo,
       estado_id:   nuevoEstado,
+      liquidado:   estaLiquidado,
     });
 
   } catch (error: any) {
