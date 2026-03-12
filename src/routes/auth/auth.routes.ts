@@ -65,6 +65,6 @@ const generalAuthLimiter = rateLimit({
 // ==========================
 router.post("/login", loginLimiter, preventSQLInjection, validateLogin, login);
 router.post("/logout", logout);
-router.get("/verify", verifyLimiter, verifyToken); // ← Rate limit específico para verify
+router.get("/verify", verifyLimiter, verifyToken); 
 
 export default router;

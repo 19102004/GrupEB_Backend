@@ -22,6 +22,7 @@ import disenoRoutes  from "./routes/diseno/diseno.routes";
 import suajesRoutes  from "./routes/suajes/suajes.routes";
 import seguimientoRoutes from "./routes/seguimiento/seguimiento.routes";
 import rodillosRoutes from "./routes/rodillos/rodillos.routes";
+import procesosRoutes from "./routes/procesos/procesos.routes";
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use("/api", calcularPrecioRoutes);
 app.use("/api", suajesRoutes);
 app.use("/api/seguimiento", seguimientoRoutes);
 app.use("/api/rodillos", rodillosRoutes);
+app.use("/api/procesos", procesosRoutes);
 
 // ==========================
 // HEALTH CHECK

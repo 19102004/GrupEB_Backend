@@ -10,6 +10,61 @@ const ESTADO = {
   PAGADO:          6,
 } as const;
 
+// ── Helper: generar folio de orden de producción ─────────────
+async function generarNoProduccion(client: any): Promise<string> {
+  const anio = new Date().getFullYear().toString().slice(-2);
+  const { rows } = await client.query(
+    `SELECT COUNT(*) AS total FROM orden_produccion 
+     WHERE no_produccion::text LIKE $1`,
+    [`OP${anio}%`]
+  );
+  const siguiente = Number(rows[0].total) + 1;
+  return `OP${anio}${String(siguiente).padStart(3, "0")}`;
+}
+
+// ── Helper: generar órdenes pendientes al cubrir anticipo ────
+async function generarOrdenesPendientes(
+  client:      any,
+  solicitudId: number
+): Promise<string[]> {
+  // Buscar productos con diseño aprobado que NO tienen orden aún
+  const { rows: pendientes } = await client.query(`
+    SELECT dp.solicitud_producto_idsolicitud_producto AS idsolicitud_producto
+    FROM diseno d
+    JOIN diseno_producto dp
+        ON dp.diseno_iddiseno = d.iddiseno
+    WHERE d.solicitud_idsolicitud = $1
+      AND dp.estado_administrativo_cat_idestado_administrativo_cat = $2
+      AND NOT EXISTS (
+        SELECT 1 FROM orden_produccion op
+        WHERE op.idsolicitud_producto = dp.solicitud_producto_idsolicitud_producto
+      )
+  `, [solicitudId, ESTADO.APROBADO]);
+
+  const ordenesCreadas: string[] = [];
+
+  for (const prod of pendientes) {
+    const noProduccion = await generarNoProduccion(client);
+
+    await client.query(
+      `INSERT INTO orden_produccion (
+        estado_administrativo_cat_idestado_administrativo_cat,
+        no_produccion,
+        fecha,
+        idsolicitud,
+        idsolicitud_producto,
+        idestado_produccion_cat
+      ) VALUES ($1, $2, NOW(), $3, $4, $5)`,
+      [ESTADO.PENDIENTE, noProduccion, solicitudId, prod.idsolicitud_producto, ESTADO.PENDIENTE]
+    );
+
+    ordenesCreadas.push(noProduccion);
+    console.log(`✅ Orden ${noProduccion} creada automáticamente al cubrir anticipo`);
+  }
+
+  return ordenesCreadas;
+}
+
 // ============================================================
 // OBTENER TODAS LAS VENTAS
 // ============================================================
@@ -187,7 +242,8 @@ export const registrarPago = async (req: Request, res: Response) => {
     await client.query("BEGIN");
 
     const { rows: ventaRows } = await client.query(
-      `SELECT idventas, total, anticipo, saldo, abono FROM ventas WHERE idventas = $1`,
+      `SELECT v.idventas, v.total, v.anticipo, v.saldo, v.abono, v.solicitud_idsolicitud
+       FROM ventas v WHERE v.idventas = $1`,
       [id]
     );
 
@@ -196,31 +252,24 @@ export const registrarPago = async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Venta no encontrada" });
     }
 
-    const venta      = ventaRows[0];
-    const montoNum   = Number(monto);
-    const abonoAntes = Number(venta.abono);
-    const nuevoAbono = Number((abonoAntes + montoNum).toFixed(2));
-    const nuevoSaldo = Number((Number(venta.total) - nuevoAbono).toFixed(2));
-    const anticipo   = Number(venta.anticipo);
+    const venta       = ventaRows[0];
+    const solicitudId = venta.solicitud_idsolicitud;
+    const montoNum    = Number(monto);
+    const abonoAntes  = Number(venta.abono);
+    const nuevoAbono  = Number((abonoAntes + montoNum).toFixed(2));
+    const nuevoSaldo  = Number((Number(venta.total) - nuevoAbono).toFixed(2));
+    const anticipo    = Number(venta.anticipo);
 
-    // es_anticipo = true SOLO cuando este pago cruza el umbral del anticipo
-    // (antes no estaba cubierto, después sí)
-    const anticipoCubierto = nuevoAbono >= anticipo;
-    const anticipoAntes    = abonoAntes < anticipo;
-    const esAnticipoReal   = anticipoAntes && anticipoCubierto;
+    const anticipoAntesNoCubierto = abonoAntes < anticipo;
+    const anticipoAhoraCubierto   = nuevoAbono >= anticipo;
+    const esAnticipoReal          = anticipoAntesNoCubierto && anticipoAhoraCubierto;
+    const esLiquidacion           = nuevoSaldo <= 0;
 
-    // fecha_liquidacion se guarda SOLO cuando el saldo queda en 0
-    const esLiquidacion = nuevoSaldo <= 0;
-
-    // Determinar nuevo estado
     let nuevoEstado: number = ESTADO.PENDIENTE;
-    if (nuevoSaldo <= 0) {
-      nuevoEstado = ESTADO.PAGADO;
-    } else if (nuevoAbono >= anticipo) {
-      nuevoEstado = ESTADO.ANTICIPO_PAGADO;
-    }
+    if (nuevoSaldo <= 0)          nuevoEstado = ESTADO.PAGADO;
+    else if (nuevoAbono >= anticipo) nuevoEstado = ESTADO.ANTICIPO_PAGADO;
 
-    // 1️⃣ Insertar pago — es_anticipo calculado automáticamente por el backend
+    // 1️⃣ Insertar pago
     await client.query(
       `INSERT INTO venta_pago (
         ventas_idventas, metodo_pago_idmetodo_pago,
@@ -229,7 +278,7 @@ export const registrarPago = async (req: Request, res: Response) => {
       [id, metodoPagoId, montoNum, esAnticipoReal, observacion]
     );
 
-    // 2️⃣ Actualizar ventas — fecha_liquidacion solo si liquida el total
+    // 2️⃣ Actualizar ventas
     await client.query(
       `UPDATE ventas
        SET abono  = $1,
@@ -240,17 +289,25 @@ export const registrarPago = async (req: Request, res: Response) => {
       [nuevoAbono, nuevoSaldo, nuevoEstado, id]
     );
 
+    // ✅ FIX: si este pago cubre el anticipo, generar órdenes para
+    // productos con diseño aprobado que aún no tienen orden
+    let ordenesGeneradas: string[] = [];
+    if (anticipoAhoraCubierto) {
+      ordenesGeneradas = await generarOrdenesPendientes(client, solicitudId);
+    }
+
     await client.query("COMMIT");
 
     return res.json({
-      message:           "Pago registrado exitosamente",
-      abono_total:       nuevoAbono,
-      saldo:             nuevoSaldo,
-      estado_id:         nuevoEstado,
-      pagado:            nuevoSaldo <= 0,
-      anticipo_cubierto: anticipoCubierto,
-      es_anticipo:       esAnticipoReal,
-      liquidado:         esLiquidacion,
+      message:            "Pago registrado exitosamente",
+      abono_total:        nuevoAbono,
+      saldo:              nuevoSaldo,
+      estado_id:          nuevoEstado,
+      pagado:             nuevoSaldo <= 0,
+      anticipo_cubierto:  anticipoAhoraCubierto,
+      es_anticipo:        esAnticipoReal,
+      liquidado:          esLiquidacion,
+      ordenes_generadas:  ordenesGeneradas, // ✅ nuevo — lista de folios creados
     });
 
   } catch (error: any) {
@@ -264,7 +321,6 @@ export const registrarPago = async (req: Request, res: Response) => {
 
 // ============================================================
 // ELIMINAR PAGO
-// Recalcula abono, saldo, estado y fecha_liquidacion
 // ============================================================
 export const eliminarPago = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -304,13 +360,9 @@ export const eliminarPago = async (req: Request, res: Response) => {
     const nuevoSaldo = Number((total - nuevoAbono).toFixed(2));
 
     let nuevoEstado: number = ESTADO.PENDIENTE;
-    if (nuevoSaldo <= 0) {
-      nuevoEstado = ESTADO.PAGADO;
-    } else if (nuevoAbono >= anticipo) {
-      nuevoEstado = ESTADO.ANTICIPO_PAGADO;
-    }
+    if (nuevoSaldo <= 0)             nuevoEstado = ESTADO.PAGADO;
+    else if (nuevoAbono >= anticipo) nuevoEstado = ESTADO.ANTICIPO_PAGADO;
 
-    // Si ya no está liquidado, limpiar fecha_liquidacion
     const estaLiquidado = nuevoSaldo <= 0;
 
     await client.query(
@@ -343,7 +395,7 @@ export const eliminarPago = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// OBTENER MÉTODOS DE PAGO (catálogo)
+// OBTENER MÉTODOS DE PAGO
 // ============================================================
 export const getMetodosPago = async (req: Request, res: Response) => {
   try {

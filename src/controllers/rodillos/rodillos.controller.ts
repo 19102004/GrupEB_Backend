@@ -16,59 +16,64 @@ export const buscarRodillo = async (req: Request, res: Response) => {
     }
 
     const { rows } = await pool.query(`
-      WITH busqueda AS (
-        SELECT $1::NUMERIC AS valor
-      ),
+      WITH busqueda AS (SELECT $1::NUMERIC AS valor),
 
-      kidder_exacto AS (
-        SELECT 'KIDDER' AS maquina, sin_grabado,
-               con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
-               NULL::NUMERIC AS con_grabado_4rep,
-               NULL::NUMERIC AS con_grabado_5rep,
-               true AS es_exacto
-        FROM rodillos_kidder, busqueda
-        WHERE sin_grabado = valor
+      -- ── KIDDER: fila cuya rep más cercana al valor buscado sea la menor distancia ──
+      kidder_candidatos AS (
+        SELECT
+          sin_grabado,
+          con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+          NULL::NUMERIC AS con_grabado_4rep,
+          NULL::NUMERIC AS con_grabado_5rep,
+          LEAST(
+            ABS(con_grabado_1rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_2rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_3rep - (SELECT valor FROM busqueda))
+          ) AS distancia_min
+        FROM rodillos_kidder
       ),
-
-      sicosa_exacto AS (
-        SELECT 'SICOSA' AS maquina, sin_grabado,
-               con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
-               con_grabado_4rep, con_grabado_5rep,
-               true AS es_exacto
-        FROM rodillos_sicosa, busqueda
-        WHERE sin_grabado = valor
-      ),
-
-      kidder_cercano AS (
-        SELECT 'KIDDER' AS maquina, sin_grabado,
-               con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
-               NULL::NUMERIC AS con_grabado_4rep,
-               NULL::NUMERIC AS con_grabado_5rep,
-               false AS es_exacto
-        FROM rodillos_kidder, busqueda
-        WHERE NOT EXISTS (SELECT 1 FROM kidder_exacto)
-        ORDER BY ABS(sin_grabado - valor)
+      kidder_mejor AS (
+        SELECT * FROM kidder_candidatos
+        ORDER BY distancia_min ASC
         LIMIT 1
       ),
 
-      sicosa_cercano AS (
-        SELECT 'SICOSA' AS maquina, sin_grabado,
-               con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
-               con_grabado_4rep, con_grabado_5rep,
-               false AS es_exacto
-        FROM rodillos_sicosa, busqueda
-        WHERE NOT EXISTS (SELECT 1 FROM sicosa_exacto)
-        ORDER BY ABS(sin_grabado - valor)
+      -- ── SICOSA: igual pero con 5 reps ──
+      sicosa_candidatos AS (
+        SELECT
+          sin_grabado,
+          con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+          con_grabado_4rep, con_grabado_5rep,
+          LEAST(
+            ABS(con_grabado_1rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_2rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_3rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_4rep - (SELECT valor FROM busqueda)),
+            ABS(con_grabado_5rep - (SELECT valor FROM busqueda))
+          ) AS distancia_min
+        FROM rodillos_sicosa
+      ),
+      sicosa_mejor AS (
+        SELECT * FROM sicosa_candidatos
+        ORDER BY distancia_min ASC
         LIMIT 1
       )
 
-      SELECT * FROM kidder_exacto
-      UNION ALL SELECT * FROM sicosa_exacto
-      UNION ALL SELECT * FROM kidder_cercano
-      UNION ALL SELECT * FROM sicosa_cercano
+      SELECT 'KIDDER' AS maquina, sin_grabado,
+             con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+             con_grabado_4rep, con_grabado_5rep,
+             distancia_min = 0 AS es_exacto
+      FROM kidder_mejor
+
+      UNION ALL
+
+      SELECT 'SICOSA' AS maquina, sin_grabado,
+             con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+             con_grabado_4rep, con_grabado_5rep,
+             distancia_min = 0 AS es_exacto
+      FROM sicosa_mejor
     `, [valor]);
 
-    console.log(`✅ Rodillos para valor ${valor}: ${rows.length} resultado(s)`);
     return res.json({ valor_buscado: valor, resultados: rows });
 
   } catch (error: any) {
