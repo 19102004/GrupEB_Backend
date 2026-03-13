@@ -257,7 +257,15 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         sd.cantidad,
         sd.kilogramos,
         sd.modo_cantidad,
-        -- ✅ kilos y metros calculados desde extrusión
+        -- datos ya calculados y guardados en orden_produccion
+        op.repeticion_extrusion,
+        op.repeticion_metro,
+        op.metros,
+        op.ancho_bobina,
+        op.kilos,
+        op.repeticion_kidder,
+        op.repeticion_sicosa,
+        -- kilos y metros de extrusión (proceso)
         ext.kilos_extruir,
         ext.metros_extruir
       FROM solicitud_producto sp
@@ -300,11 +308,11 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         ? (r.calibre_bopp ? String(r.calibre_bopp) : "")
         : (r.calibre_numero && Number(r.calibre_numero) !== 0 ? String(r.calibre_numero) : "");
 
-      const altura      = r.altura       ? String(r.altura)       : "";
-      const ancho       = r.ancho        ? String(r.ancho)        : "";
-      const fuelleFondo = r.fuelle_fondo ? String(r.fuelle_fondo) : "";
+      const altura      = r.altura        ? String(r.altura)        : "";
+      const ancho       = r.ancho         ? String(r.ancho)         : "";
+      const fuelleFondo = r.fuelle_fondo  ? String(r.fuelle_fondo)  : "";
       const fuelleLat   = r.fuelle_lat_iz ? String(r.fuelle_lat_iz) : "";
-      const refuerzo    = r.refuerzo     ? String(r.refuerzo)     : "";
+      const refuerzo    = r.refuerzo      ? String(r.refuerzo)      : "";
 
       return {
         idsolicitud_producto:    r.idsolicitud_producto,
@@ -350,7 +358,15 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         cantidad:      r.cantidad   ? Number(r.cantidad)   : null,
         kilogramos:    r.kilogramos ? Number(r.kilogramos) : null,
         modo_cantidad: r.modo_cantidad || "unidad",
-        // ✅ calculados automáticamente
+        // ── datos de extrusión guardados al crear la orden ────────
+        repeticion_extrusion: r.repeticion_extrusion ? Number(r.repeticion_extrusion) : null,
+        repeticion_metro:     r.repeticion_metro     ? Number(r.repeticion_metro)     : null,
+        metros:               r.metros               ? Number(r.metros)               : null,
+        ancho_bobina:         r.ancho_bobina         ? Number(r.ancho_bobina)         : null,
+        kilos:                r.kilos                ? Number(r.kilos)                : null,
+        repeticion_kidder:    r.repeticion_kidder    ?? null,
+        repeticion_sicosa:    r.repeticion_sicosa    ?? null,
+        // ── datos del proceso de extrusión (progreso real) ────────
         kilos_extruir:  r.kilos_extruir  ? Number(r.kilos_extruir)  : null,
         metros_extruir: r.metros_extruir ? Number(r.metros_extruir) : null,
       };

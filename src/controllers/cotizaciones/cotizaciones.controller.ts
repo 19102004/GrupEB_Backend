@@ -28,6 +28,9 @@ async function obtenerSiguienteNoPedido(client: any): Promise<number> {
   return rows[0].siguiente;
 }
 
+// ============================================================
+// CREAR VENTA Y DISEÑO (sin orden_produccion — se crea en disenoController)
+// ============================================================
 async function crearVentaYDiseno(
   client:      any,
   solicitudId: number,
@@ -50,7 +53,6 @@ async function crearVentaYDiseno(
   );
   console.log(`✅ Venta creada: idventas=${ventaRows[0].idventas} para pedido #${noPedido}`);
 
-  // ✅ FIX: 1 solo diseno por pedido
   const { rows: disenoRows } = await client.query(
     `INSERT INTO diseno (
       solicitud_idsolicitud,
@@ -62,7 +64,6 @@ async function crearVentaYDiseno(
   );
   const disenoId = disenoRows[0].iddiseno;
 
-  // ✅ FIX: N diseno_producto apuntando al mismo diseno padre
   const { rows: productos } = await client.query(
     `SELECT idsolicitud_producto FROM solicitud_producto
      WHERE solicitud_idsolicitud = $1`,
@@ -161,6 +162,9 @@ export const crearCotizacion = async (req: Request, res: Response) => {
       const solicitudProductoId = prodRows[0].idsolicitud_producto;
       const porKiloNum = porKilo ? Number(porKilo) : 0;
 
+      // ── FIX: aprobado = true en pedido directo, null en cotizacion ──
+      const aprobadoValor = tipoDocumento === "pedido" ? true : null;
+
       for (const d of detallesValidos) {
         const modoDetalle = d.modo_cantidad === "kilo" ? "kilo" : "unidad";
         let kilogramos: number | null = null;
@@ -177,13 +181,14 @@ export const crearCotizacion = async (req: Request, res: Response) => {
             solicitud_producto_id, cantidad, precio_total, aprobado,
             kilogramos, modo_cantidad
           ) VALUES ($1, $2, $3, $4, $5, $6)`,
-          [solicitudProductoId, d.cantidad, d.precio_total, null, kilogramos, modoDetalle]
+          [solicitudProductoId, d.cantidad, d.precio_total, aprobadoValor, kilogramos, modoDetalle]
         );
 
         subtotalTotal += Number(d.precio_total);
       }
     }
 
+    // ── Crear venta y diseño (la orden_produccion la crea disenoController) ──
     if (tipoDocumento === "pedido") {
       await crearVentaYDiseno(client, solicitudId, noPedidoGuardado, subtotalTotal);
     }

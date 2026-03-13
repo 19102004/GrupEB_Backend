@@ -45,23 +45,14 @@ const CAMPOS_PROCESO: Record<string, string[]> = {
   asa_flexible: ["kilos_bolsear", "merma", "piezas_recibidas"],
 };
 
+// Máquinas válidas para impresión
+const MAQUINAS_IMPRESION = ["kidder", "sicosa"] as const;
+type MaquinaImpresion = typeof MAQUINAS_IMPRESION[number];
+
 // ============================================================
 // CÁLCULOS AUTOMÁTICOS
 // ============================================================
 
-/**
- * Calcula metros a extruir y ancho de bobina.
- *
- * Sin fuelle de fondo:
- *   ancho_bobina = ancho + fuelle_lat_iz + fuelle_lat_de + refuerzo
- *   repeticion   = alto
- *
- * Con fuelle de fondo:
- *   ancho_bobina = alto + fuelle_fondo + refuerzo
- *   repeticion   = ancho
- *
- * metros = cantidad × (repeticion / 100)
- */
 function calcularMetrosExtruir(p: {
   alto: number; ancho: number;
   fuelle_fondo: number; fuelle_lat_iz: number; fuelle_lat_de: number;
@@ -82,17 +73,10 @@ function calcularMetrosExtruir(p: {
   return { metros_extruir, ancho_bobina };
 }
 
-/**
- * Calcula kilos a extruir.
- * kilos = cantidad / por_kilo
- */
 function calcularKilosExtruir(cantidad: number, por_kilo: number): number {
   return parseFloat((cantidad / por_kilo).toFixed(2));
 }
 
-/**
- * Obtiene medidas del producto y cantidad aprobada para una orden.
- */
 async function getMedidasProducto(client: any, idproduccion: number) {
   const { rows } = await client.query(`
     SELECT
@@ -191,7 +175,10 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
         op.proceso_actual, op.idestado_produccion_cat,
         ep.nombre AS estado_nombre,
         s.no_pedido, sp.idsolicitud_producto,
-        cfg.tipo_producto_plastico_plastico_idtipo_producto_plastico AS idtipo_producto
+        cfg.tipo_producto_plastico_plastico_idtipo_producto_plastico AS idtipo_producto,
+        -- datos de repetición para el selector de máquina
+        op.repeticion_kidder,
+        op.repeticion_sicosa
       FROM orden_produccion op
       JOIN estado_produccion_cat ep ON ep.idestado_produccion_cat = op.idestado_produccion_cat
       JOIN solicitud_producto sp    ON sp.idsolicitud_producto    = op.idsolicitud_producto
@@ -254,12 +241,14 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
     }
 
     return res.json({
-      idproduccion:   Number(idproduccion),
-      no_produccion:  orden.no_produccion,
-      no_pedido:      orden.no_pedido,
-      proceso_actual: procesoActual,
-      estado_id:      orden.idestado_produccion_cat,
-      estado_nombre:  orden.estado_nombre,
+      idproduccion:        Number(idproduccion),
+      no_produccion:       orden.no_produccion,
+      no_pedido:           orden.no_pedido,
+      proceso_actual:      procesoActual,
+      estado_id:           orden.idestado_produccion_cat,
+      estado_nombre:       orden.estado_nombre,
+      repeticion_kidder:   orden.repeticion_kidder  ?? null,
+      repeticion_sicosa:   orden.repeticion_sicosa  ?? null,
       procesos,
     });
 
@@ -276,6 +265,8 @@ export const iniciarProceso = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const { idproduccion } = req.params;
+    const { maquina, repeticion } = req.body as { maquina?: string; repeticion?: string };
+
     await client.query("BEGIN");
 
     let { procesoActualCat } = await getProcesoActualOrden(client, Number(idproduccion));
@@ -302,6 +293,16 @@ export const iniciarProceso = async (req: Request, res: Response) => {
       return res.status(400).json({ error: `Proceso ${procesoActualCat} no tiene tabla asociada` });
     }
 
+    // ── Validar máquina si es impresión ─────────────────────
+    if (procesoActualCat === PROCESO.IMPRESION) {
+      if (!maquina || !MAQUINAS_IMPRESION.includes(maquina as MaquinaImpresion)) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: "Debes seleccionar una máquina de impresión: kidder o sicosa",
+        });
+      }
+    }
+
     const { rows: existeRows } = await client.query(
       `SELECT * FROM ${tabla} WHERE orden_produccion_idproduccion = $1`,
       [idproduccion]
@@ -318,7 +319,6 @@ export const iniciarProceso = async (req: Request, res: Response) => {
         const cant    = Number(medidas.cantidad);
         const porKilo = Number(medidas.por_kilo);
 
-        // Metros
         if (cant > 0) {
           const calc = calcularMetrosExtruir({
             alto:          Number(medidas.alto),
@@ -333,7 +333,6 @@ export const iniciarProceso = async (req: Request, res: Response) => {
           console.log(`📐 Ancho bobina: ${calc.ancho_bobina} cm | Metros: ${metros_extruir} m`);
         }
 
-        // Kilos — si modo_cantidad es "kilo" usamos kilogramos directamente
         if (medidas.modo_cantidad === "kilo" && medidas.kilogramos) {
           kilos_extruir = parseFloat(Number(medidas.kilogramos).toFixed(2));
         } else if (cant > 0 && porKilo > 0) {
@@ -352,7 +351,6 @@ export const iniciarProceso = async (req: Request, res: Response) => {
             metros_extruir, kilos_extruir
           ) VALUES ($1, $2, NOW(), NOW(), $3, $4)
         `, [ESTADO_PROD.EN_PROCESO, idproduccion, metros_extruir, kilos_extruir]);
-
       } else if (!existeRows[0].fecha_inicio) {
         await client.query(`
           UPDATE extrusion
@@ -362,6 +360,31 @@ export const iniciarProceso = async (req: Request, res: Response) => {
               kilos_extruir  = COALESCE(kilos_extruir,  $3)
           WHERE orden_produccion_idproduccion = $4
         `, [ESTADO_PROD.EN_PROCESO, metros_extruir, kilos_extruir, idproduccion]);
+      }
+
+    // Impresion: guardar maquina + repeticion en el campo maquina (TEXT)
+    } else if (procesoActualCat === PROCESO.IMPRESION) {
+      const maquinaCompleta = repeticion ? `${maquina} | ${repeticion}` : (maquina ?? null);
+
+      console.log(`Impresion iniciada — maquina: ${maquinaCompleta}`);
+
+      if (existeRows.length === 0) {
+        await client.query(`
+          INSERT INTO impresion (
+            estado_produccion_cat_idestado_produccion_cat,
+            orden_produccion_idproduccion,
+            fecha_creacion, fecha_inicio,
+            maquina
+          ) VALUES ($1, $2, NOW(), NOW(), $3)
+        `, [ESTADO_PROD.EN_PROCESO, idproduccion, maquinaCompleta]);
+      } else if (!existeRows[0].fecha_inicio) {
+        await client.query(`
+          UPDATE impresion
+          SET fecha_inicio = NOW(),
+              estado_produccion_cat_idestado_produccion_cat = $1,
+              maquina = $2
+          WHERE orden_produccion_idproduccion = $3
+        `, [ESTADO_PROD.EN_PROCESO, maquinaCompleta, idproduccion]);
       }
 
     } else {
@@ -398,6 +421,8 @@ export const iniciarProceso = async (req: Request, res: Response) => {
       proceso_actual: procesoActualCat,
       tabla,
       estado_id:      estadoOrden,
+      maquina:        procesoActualCat === PROCESO.IMPRESION ? maquina    : undefined,
+      repeticion:     procesoActualCat === PROCESO.IMPRESION ? repeticion : undefined,
     });
 
   } catch (error: any) {
@@ -453,7 +478,6 @@ export const finalizarProceso = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "El proceso no ha sido iniciado aún" });
     }
 
-    // Guardar datos finales del proceso actual
     const campos     = CAMPOS_PROCESO[tabla] ?? [];
     const setClauses = ["fecha_fin = NOW()", "estado_produccion_cat_idestado_produccion_cat = $1"];
     const values: any[] = [ESTADO_PROD.TERMINADO];
@@ -478,24 +502,19 @@ export const finalizarProceso = async (req: Request, res: Response) => {
     if (siguienteProceso !== null) {
       const tablaSiguiente = PROCESO_TABLA[siguienteProceso];
 
-      // ── Traspaso automático metros/kilos entre procesos ──────
       let metrosSiguiente: number | null = null;
       let kilosSiguiente:  number | null = null;
 
       if (procesoActualCat === PROCESO.EXTRUSION) {
-        // Extrusión → Impresión
         metrosSiguiente = datos.metros_extruidos ? Number(datos.metros_extruidos) : null;
         kilosSiguiente  = datos.k_para_impresion  ? Number(datos.k_para_impresion)  : null;
         console.log(`📐 Extrusión → Impresión | metros: ${metrosSiguiente} | kilos: ${kilosSiguiente}`);
-
       } else if (procesoActualCat === PROCESO.IMPRESION) {
-        // Impresión → Bolseo
         metrosSiguiente = datos.metros_impresos ? Number(datos.metros_impresos) : null;
         kilosSiguiente  = datos.kilos_impresos  ? Number(datos.kilos_impresos)  : null;
         console.log(`📐 Impresión → Bolseo | kilos: ${kilosSiguiente}`);
       }
 
-      // Insert del siguiente proceso con datos pre-llenados
       if (tablaSiguiente === "impresion") {
         await client.query(`
           INSERT INTO impresion (
@@ -507,7 +526,6 @@ export const finalizarProceso = async (req: Request, res: Response) => {
           ) VALUES ($1, $2, NOW(), $3, $4)
           ON CONFLICT DO NOTHING
         `, [ESTADO_PROD.PENDIENTE, idproduccion, metrosSiguiente, kilosSiguiente]);
-
       } else if (tablaSiguiente === "bolseo") {
         await client.query(`
           INSERT INTO bolseo (
@@ -518,7 +536,6 @@ export const finalizarProceso = async (req: Request, res: Response) => {
           ) VALUES ($1, $2, NOW(), $3)
           ON CONFLICT DO NOTHING
         `, [ESTADO_PROD.PENDIENTE, idproduccion, kilosSiguiente]);
-
       } else {
         await client.query(`
           INSERT INTO ${tablaSiguiente} (

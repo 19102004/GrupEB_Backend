@@ -22,12 +22,224 @@ async function generarNoProduccion(client: any): Promise<string> {
   return `OP${anio}${String(siguiente).padStart(3, "0")}`;
 }
 
+// ============================================================
+// CÁLCULOS DE EXTRUSIÓN
+// ============================================================
+
+function calcularDatosExtrusion(p: {
+  alto:          number;
+  ancho:         number;
+  fuelle_fondo:  number;
+  fuelle_lat_iz: number;
+  fuelle_lat_de: number;
+  refuerzo:      number;
+  cantidad:      number;
+}): {
+  repeticion_extrusion: number;
+  repeticion_metro:     number;
+  metros:               number;
+  ancho_bobina:         number;
+} {
+  let repeticion_extrusion: number;
+  let ancho_bobina:         number;
+
+  if (p.fuelle_fondo > 0) {
+    repeticion_extrusion = p.ancho;
+    ancho_bobina         = p.alto + p.fuelle_fondo + p.refuerzo;
+  } else {
+    repeticion_extrusion = p.alto;
+    ancho_bobina         = p.ancho + p.fuelle_lat_iz + p.fuelle_lat_de + p.refuerzo;
+  }
+
+  const repeticion_metro = repeticion_extrusion > 0
+    ? parseFloat((100 / repeticion_extrusion).toFixed(4))
+    : 0;
+
+  const metros = parseFloat((p.cantidad * (repeticion_extrusion / 100)).toFixed(1));
+
+  return {
+    repeticion_extrusion: parseFloat(repeticion_extrusion.toFixed(2)),
+    repeticion_metro,
+    metros,
+    ancho_bobina: parseFloat(ancho_bobina.toFixed(2)),
+  };
+}
+
+async function buscarRepeticionRodillos(
+  client: any,
+  valor: number
+): Promise<{ kidder: string | null; sicosa: string | null }> {
+  if (!valor || valor <= 0) return { kidder: null, sicosa: null };
+
+  try {
+    const { rows: kidderRows } = await client.query(`
+      SELECT
+        sin_grabado,
+        con_grabado_1rep,
+        con_grabado_2rep,
+        con_grabado_3rep,
+        LEAST(
+          ABS(con_grabado_1rep - $1),
+          ABS(con_grabado_2rep - $1),
+          ABS(con_grabado_3rep - $1)
+        ) AS distancia_min
+      FROM rodillos_kidder
+      ORDER BY distancia_min ASC
+      LIMIT 1
+    `, [valor]);
+
+    const { rows: sicosaRows } = await client.query(`
+      SELECT
+        sin_grabado,
+        con_grabado_1rep,
+        con_grabado_2rep,
+        con_grabado_3rep,
+        con_grabado_4rep,
+        con_grabado_5rep,
+        LEAST(
+          ABS(con_grabado_1rep - $1),
+          ABS(con_grabado_2rep - $1),
+          ABS(con_grabado_3rep - $1),
+          ABS(con_grabado_4rep - $1),
+          ABS(con_grabado_5rep - $1)
+        ) AS distancia_min
+      FROM rodillos_sicosa
+      ORDER BY distancia_min ASC
+      LIMIT 1
+    `, [valor]);
+
+    const formatearRodillo = (
+      row: any,
+      reps: { label: string; col: string }[]
+    ): string | null => {
+      if (!row) return null;
+
+      const candidatos = reps
+        .map(r => ({ label: r.label, valor: parseFloat(row[r.col]) || 0 }))
+        .filter(r => r.valor > 0);
+
+      if (candidatos.length === 0) return null;
+
+      const mejor = candidatos.reduce((prev, curr) =>
+        Math.abs(curr.valor - valor) < Math.abs(prev.valor - valor) ? curr : prev
+      );
+
+      const sinGrab  = parseFloat(row.sin_grabado).toFixed(2);
+      const esExacto = Math.abs(mejor.valor - valor) < 0.001;
+      const prefijo  = esExacto ? "" : "~";
+
+      return `SG=${sinGrab} | ${prefijo}${mejor.valor.toFixed(2)} (${mejor.label})`;
+    };
+
+    const kidder = formatearRodillo(kidderRows[0], [
+      { label: "1 rep", col: "con_grabado_1rep" },
+      { label: "2 rep", col: "con_grabado_2rep" },
+      { label: "3 rep", col: "con_grabado_3rep" },
+    ]);
+
+    const sicosa = formatearRodillo(sicosaRows[0], [
+      { label: "1 rep", col: "con_grabado_1rep" },
+      { label: "2 rep", col: "con_grabado_2rep" },
+      { label: "3 rep", col: "con_grabado_3rep" },
+      { label: "4 rep", col: "con_grabado_4rep" },
+      { label: "5 rep", col: "con_grabado_5rep" },
+    ]);
+
+    return { kidder, sicosa };
+
+  } catch (err: any) {
+    console.warn("⚠️ buscarRepeticionRodillos error:", err.message);
+    return { kidder: null, sicosa: null };
+  }
+}
+
+async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
+  const { rows } = await client.query(`
+    SELECT
+      COALESCE(cfg.altura,       0) AS alto,
+      COALESCE(cfg.ancho,        0) AS ancho,
+      COALESCE(cfg.fuelle_fondo, 0) AS fuelle_fondo,
+      COALESCE(cfg.fuelle_latIz, 0) AS fuelle_lat_iz,
+      COALESCE(cfg.fuelle_latDe, 0) AS fuelle_lat_de,
+      COALESCE(cfg.refuerzo,     0) AS refuerzo,
+      COALESCE(sd.cantidad,      0) AS cantidad,
+      sd.kilogramos,
+      sd.modo_cantidad
+    FROM solicitud_producto sp
+    JOIN configuracion_plastico cfg
+        ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
+    LEFT JOIN solicitud_detalle sd
+        ON sd.solicitud_producto_id = sp.idsolicitud_producto
+        AND sd.aprobado = true
+    WHERE sp.idsolicitud_producto = $1
+    LIMIT 1
+  `, [idsolicitudProducto]);
+
+  return rows[0] ?? null;
+}
+
+async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
+  const medidas = await getMedidasParaOrden(client, idsolicitudProducto);
+
+  if (!medidas) {
+    return {
+      repeticion_extrusion: null,
+      repeticion_metro:     null,
+      metros:               null,
+      ancho_bobina:         null,
+      kilos:                null,
+      repeticion_kidder:    null,
+      repeticion_sicosa:    null,
+    };
+  }
+
+  const cantidad = Number(medidas.cantidad);
+  const kilos    = medidas.kilogramos ? parseFloat(Number(medidas.kilogramos).toFixed(4)) : null;
+
+  if (cantidad <= 0) {
+    return {
+      repeticion_extrusion: null,
+      repeticion_metro:     null,
+      metros:               null,
+      ancho_bobina:         null,
+      kilos,
+      repeticion_kidder:    null,
+      repeticion_sicosa:    null,
+    };
+  }
+
+  const ext = calcularDatosExtrusion({
+    alto:          Number(medidas.alto),
+    ancho:         Number(medidas.ancho),
+    fuelle_fondo:  Number(medidas.fuelle_fondo),
+    fuelle_lat_iz: Number(medidas.fuelle_lat_iz),
+    fuelle_lat_de: Number(medidas.fuelle_lat_de),
+    refuerzo:      Number(medidas.refuerzo),
+    cantidad,
+  });
+
+  console.log(`📐 Orden [${idsolicitudProducto}] → rep=${ext.repeticion_extrusion} | metros=${ext.metros} | bobina=${ext.ancho_bobina}`);
+
+  const rodillos = await buscarRepeticionRodillos(client, ext.repeticion_extrusion);
+
+  console.log(`🎡 Rodillos → KIDDER: ${rodillos.kidder} | SICOSA: ${rodillos.sicosa}`);
+
+  return {
+    repeticion_extrusion: ext.repeticion_extrusion,
+    repeticion_metro:     ext.repeticion_metro,
+    metros:               ext.metros,
+    ancho_bobina:         ext.ancho_bobina,
+    kilos,
+    repeticion_kidder:    rodillos.kidder,
+    repeticion_sicosa:    rodillos.sicosa,
+  };
+}
+
 // ── Helper: generar órdenes pendientes al cubrir anticipo ────
 async function generarOrdenesPendientes(
   client:      any,
   solicitudId: number
 ): Promise<string[]> {
-  // Buscar productos con diseño aprobado que NO tienen orden aún
   const { rows: pendientes } = await client.query(`
     SELECT dp.solicitud_producto_idsolicitud_producto AS idsolicitud_producto
     FROM diseno d
@@ -46,6 +258,9 @@ async function generarOrdenesPendientes(
   for (const prod of pendientes) {
     const noProduccion = await generarNoProduccion(client);
 
+    // ── Calcular datos de extrusión y rodillos ANTES de insertar ──
+    const datosOrden = await prepararDatosOrden(client, prod.idsolicitud_producto);
+
     await client.query(
       `INSERT INTO orden_produccion (
         estado_administrativo_cat_idestado_administrativo_cat,
@@ -53,9 +268,29 @@ async function generarOrdenesPendientes(
         fecha,
         idsolicitud,
         idsolicitud_producto,
-        idestado_produccion_cat
-      ) VALUES ($1, $2, NOW(), $3, $4, $5)`,
-      [ESTADO.PENDIENTE, noProduccion, solicitudId, prod.idsolicitud_producto, ESTADO.PENDIENTE]
+        idestado_produccion_cat,
+        repeticion_extrusion,
+        repeticion_metro,
+        metros,
+        ancho_bobina,
+        kilos,
+        repeticion_kidder,
+        repeticion_sicosa
+      ) VALUES ($1,$2,NOW(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [
+        ESTADO.PENDIENTE,
+        noProduccion,
+        solicitudId,
+        prod.idsolicitud_producto,
+        ESTADO.PENDIENTE,
+        datosOrden.repeticion_extrusion,
+        datosOrden.repeticion_metro,
+        datosOrden.metros,
+        datosOrden.ancho_bobina,
+        datosOrden.kilos,
+        datosOrden.repeticion_kidder,
+        datosOrden.repeticion_sicosa,
+      ]
     );
 
     ordenesCreadas.push(noProduccion);
@@ -266,7 +501,7 @@ export const registrarPago = async (req: Request, res: Response) => {
     const esLiquidacion           = nuevoSaldo <= 0;
 
     let nuevoEstado: number = ESTADO.PENDIENTE;
-    if (nuevoSaldo <= 0)          nuevoEstado = ESTADO.PAGADO;
+    if (nuevoSaldo <= 0)             nuevoEstado = ESTADO.PAGADO;
     else if (nuevoAbono >= anticipo) nuevoEstado = ESTADO.ANTICIPO_PAGADO;
 
     // 1️⃣ Insertar pago
@@ -289,8 +524,7 @@ export const registrarPago = async (req: Request, res: Response) => {
       [nuevoAbono, nuevoSaldo, nuevoEstado, id]
     );
 
-    // ✅ FIX: si este pago cubre el anticipo, generar órdenes para
-    // productos con diseño aprobado que aún no tienen orden
+    // 3️⃣ Si se cubre el anticipo, generar órdenes con datos completos
     let ordenesGeneradas: string[] = [];
     if (anticipoAhoraCubierto) {
       ordenesGeneradas = await generarOrdenesPendientes(client, solicitudId);
@@ -307,7 +541,7 @@ export const registrarPago = async (req: Request, res: Response) => {
       anticipo_cubierto:  anticipoAhoraCubierto,
       es_anticipo:        esAnticipoReal,
       liquidado:          esLiquidacion,
-      ordenes_generadas:  ordenesGeneradas, // ✅ nuevo — lista de folios creados
+      ordenes_generadas:  ordenesGeneradas,
     });
 
   } catch (error: any) {
