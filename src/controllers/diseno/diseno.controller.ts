@@ -29,15 +29,51 @@ async function anticipoPagado(client: any, solicitudId: number): Promise<boolean
 }
 
 // ============================================================
-// CÁLCULOS DE EXTRUSIÓN
+// OBTENER MERMA SEGÚN RANGO DE KILOS + TINTAS
 // ============================================================
 
 /**
- * Calcula los campos de extrusión antes de guardar la orden.
- *
- * Fuelle lateral  → repeticion = alto,  ancho_bobina = ancho + fLat_iz + fLat_de + refuerzo
- * Fuelle de fondo → repeticion = ancho, ancho_bobina = alto  + fFondo  + refuerzo
+ * Consulta tarifas_produccion filtrando por rango de kilos Y tintas.
+ * Ambos parámetros son necesarios para obtener el % correcto.
+ * Si no encuentra tarifa exacta, devuelve 0.
  */
+async function obtenerMerma(
+  client:    any,
+  kilos:     number,
+  tintasId:  number
+): Promise<number> {
+  if (!kilos || kilos <= 0) return 0;
+
+  try {
+    const { rows } = await client.query(`
+      SELECT tp.merma_porcentaje
+      FROM tarifas_produccion tp
+      INNER JOIN kilogramos k ON k.idkilogramos = tp.kilogramos_idkilogramos
+      WHERE tp.tintas_idtintas = $1
+        AND $2 >= k.kg_min
+        AND ($2 <= k.kg_max OR k.kg_max IS NULL)
+      LIMIT 1
+    `, [tintasId, kilos]);
+
+    if (rows.length === 0) {
+      console.warn(`⚠️ No se encontró tarifa de merma para ${kilos} kg / tintas_id=${tintasId} — se usará 0%`);
+      return 0;
+    }
+
+    const merma = Number(rows[0].merma_porcentaje);
+    console.log(`📊 Merma para ${kilos} kg + tintas_id=${tintasId} → ${merma}%`);
+    return merma;
+
+  } catch (err: any) {
+    console.warn("⚠️ obtenerMerma error:", err.message);
+    return 0;
+  }
+}
+
+// ============================================================
+// CÁLCULOS DE EXTRUSIÓN
+// ============================================================
+
 function calcularDatosExtrusion(p: {
   alto:          number;
   ancho:         number;
@@ -77,12 +113,6 @@ function calcularDatosExtrusion(p: {
   };
 }
 
-/**
- * Busca el rodillo más cercano en ambas máquinas y devuelve
- * el texto formateado para guardar en BD.
- *
- * Formato: "SG=34.20 | ~35.70 (1 rep)"
- */
 async function buscarRepeticionRodillos(
   client: any,
   valor: number
@@ -90,7 +120,6 @@ async function buscarRepeticionRodillos(
   if (!valor || valor <= 0) return { kidder: null, sicosa: null };
 
   try {
-    // ── KIDDER ───────────────────────────────────────────────
     const { rows: kidderRows } = await client.query(`
       SELECT
         sin_grabado,
@@ -107,7 +136,6 @@ async function buscarRepeticionRodillos(
       LIMIT 1
     `, [valor]);
 
-    // ── SICOSA ───────────────────────────────────────────────
     const { rows: sicosaRows } = await client.query(`
       SELECT
         sin_grabado,
@@ -134,7 +162,6 @@ async function buscarRepeticionRodillos(
     ): string | null => {
       if (!row) return null;
 
-      // Encontrar la rep más cercana al valor buscado
       const candidatos = reps
         .map(r => ({ label: r.label, valor: parseFloat(row[r.col]) || 0 }))
         .filter(r => r.valor > 0);
@@ -175,8 +202,8 @@ async function buscarRepeticionRodillos(
 }
 
 /**
- * Obtiene las medidas del producto y la cantidad/kilos aprobados
- * para calcular los datos de extrusión antes de crear la orden.
+ * Obtiene medidas, cantidad/kilos aprobados Y tintas del producto
+ * para calcular merma y datos de extrusión.
  */
 async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
   const { rows } = await client.query(`
@@ -189,7 +216,8 @@ async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
       COALESCE(cfg.refuerzo,     0) AS refuerzo,
       COALESCE(sd.cantidad,      0) AS cantidad,
       sd.kilogramos,
-      sd.modo_cantidad
+      sd.modo_cantidad,
+      sp.tintas_idtintas
     FROM solicitud_producto sp
     JOIN configuracion_plastico cfg
         ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
@@ -204,8 +232,14 @@ async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
 }
 
 /**
- * Calcula y devuelve todos los datos de extrusión + rodillos
+ * Calcula y devuelve todos los datos de extrusión + rodillos + merma
  * listos para insertar en orden_produccion.
+ *
+ * Campos de merma:
+ *   kilos       → kilos pedidos (sin merma)
+ *   kilos_merma → kilos + % merma según rango kg + tintas
+ *   pzas        → piezas pedidas (sin merma)
+ *   pzas_merma  → piezas + % merma
  */
 async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
   const medidas = await getMedidasParaOrden(client, idsolicitudProducto);
@@ -217,15 +251,33 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
       metros:               null,
       ancho_bobina:         null,
       kilos:                null,
+      kilos_merma:          null,
+      pzas:                 null,
+      pzas_merma:           null,
       repeticion_kidder:    null,
       repeticion_sicosa:    null,
     };
   }
 
-  const cantidad = Number(medidas.cantidad);
-  const kilos    = medidas.kilogramos ? parseFloat(Number(medidas.kilogramos).toFixed(4)) : null;
+  const cantidad  = Number(medidas.cantidad);
+  const kilos     = medidas.kilogramos ? parseFloat(Number(medidas.kilogramos).toFixed(4)) : null;
+  const tintasId  = Number(medidas.tintas_idtintas) || 1;
 
-  // Calcular extrusión solo si hay cantidad
+  // ── Calcular merma según rango de kilos + tintas ─────────
+  const mermaPct    = kilos ? await obtenerMerma(client, kilos, tintasId) : 0;
+  const factorMerma = 1 + mermaPct / 100;
+
+  const kilos_merma = kilos
+    ? parseFloat((kilos * factorMerma).toFixed(2))
+    : null;
+
+  const pzas       = cantidad > 0 ? cantidad : null;
+  const pzas_merma = pzas
+    ? Math.round(pzas * factorMerma)
+    : null;
+
+  console.log(`🧮 Merma [${idsolicitudProducto}] tintas_id=${tintasId} → ${mermaPct}% | kilos: ${kilos} → ${kilos_merma} | pzas: ${pzas} → ${pzas_merma}`);
+
   if (cantidad <= 0) {
     return {
       repeticion_extrusion: null,
@@ -233,6 +285,9 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
       metros:               null,
       ancho_bobina:         null,
       kilos,
+      kilos_merma,
+      pzas,
+      pzas_merma,
       repeticion_kidder:    null,
       repeticion_sicosa:    null,
     };
@@ -250,7 +305,6 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
 
   console.log(`📐 Orden [${idsolicitudProducto}] → rep=${ext.repeticion_extrusion} | metros=${ext.metros} | bobina=${ext.ancho_bobina}`);
 
-  // Buscar rodillos usando la repeticion_extrusion como valor de búsqueda
   const rodillos = await buscarRepeticionRodillos(client, ext.repeticion_extrusion);
 
   console.log(`🎡 Rodillos → KIDDER: ${rodillos.kidder} | SICOSA: ${rodillos.sicosa}`);
@@ -261,6 +315,9 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
     metros:               ext.metros,
     ancho_bobina:         ext.ancho_bobina,
     kilos,
+    kilos_merma,
+    pzas,
+    pzas_merma,
     repeticion_kidder:    rodillos.kidder,
     repeticion_sicosa:    rodillos.sicosa,
   };
@@ -318,7 +375,11 @@ export const getDisenoByPedido = async (req: Request, res: Response) => {
         sd.precio_total,
 
         op.no_produccion,
-        op.idproduccion
+        op.idproduccion,
+        op.kilos,
+        op.kilos_merma,
+        op.pzas,
+        op.pzas_merma
 
       FROM diseno_producto dp
       JOIN estado_administrativo_cat est
@@ -359,6 +420,10 @@ export const getDisenoByPedido = async (req: Request, res: Response) => {
       no_produccion:    p.no_produccion ?? null,
       idproduccion:     p.idproduccion  ?? null,
       orden_generada:   !!p.no_produccion,
+      kilos:            p.kilos       != null ? Number(p.kilos)       : null,
+      kilos_merma:      p.kilos_merma != null ? Number(p.kilos_merma) : null,
+      pzas:             p.pzas        != null ? Number(p.pzas)        : null,
+      pzas_merma:       p.pzas_merma  != null ? Number(p.pzas_merma)  : null,
     }));
 
     const total     = productosFormateados.length;
@@ -439,7 +504,6 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
       );
     }
 
-    // Obtener diseno padre y solicitud
     const { rows: dpRows } = await client.query(
       `SELECT dp.diseno_iddiseno,
               dp.solicitud_producto_idsolicitud_producto AS idsolicitud_producto,
@@ -454,7 +518,6 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
     const idsolicitudProducto = dpRows[0].idsolicitud_producto;
     const solicitudId         = dpRows[0].solicitud_idsolicitud;
 
-    // Recalcular estado del diseno padre
     const { rows: todosProductos } = await client.query(
       `SELECT estado_administrativo_cat_idestado_administrativo_cat AS estado_id
        FROM diseno_producto
@@ -503,8 +566,6 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
 
         if (ordenExistente.length === 0) {
           noProduccion = await generarNoProduccion(client);
-
-          // ── Calcular datos de extrusión y rodillos ANTES de insertar ──
           const datosOrden = await prepararDatosOrden(client, idsolicitudProducto);
 
           await client.query(
@@ -512,6 +573,7 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
               estado_administrativo_cat_idestado_administrativo_cat,
               no_produccion,
               fecha,
+              fecha_entrega,
               idsolicitud,
               idsolicitud_producto,
               idestado_produccion_cat,
@@ -520,9 +582,12 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
               metros,
               ancho_bobina,
               kilos,
+              kilos_merma,
+              pzas,
+              pzas_merma,
               repeticion_kidder,
               repeticion_sicosa
-            ) VALUES ($1,$2,NOW(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+            ) VALUES ($1,$2,NOW(),NOW() + INTERVAL '35 days',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
             [
               ESTADO.PENDIENTE,
               noProduccion,
@@ -534,13 +599,16 @@ export const actualizarEstadoProducto = async (req: Request, res: Response) => {
               datosOrden.metros,
               datosOrden.ancho_bobina,
               datosOrden.kilos,
+              datosOrden.kilos_merma,
+              datosOrden.pzas,
+              datosOrden.pzas_merma,
               datosOrden.repeticion_kidder,
               datosOrden.repeticion_sicosa,
             ]
           );
 
           ordenGenerada = true;
-          console.log(`✅ Orden ${noProduccion} creada para producto ${idsolicitudProducto}`);
+          console.log(`✅ Orden ${noProduccion} creada con merma correcta (kg+tintas)`);
         } else {
           ordenGenerada = true;
         }

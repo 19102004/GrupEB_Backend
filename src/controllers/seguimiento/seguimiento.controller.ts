@@ -79,7 +79,13 @@ export const getSeguimiento = async (req: Request, res: Response) => {
         asz.tipo                        AS asa_suaje,
         sd.cantidad                     AS cantidad_orden,
         sd.kilogramos                   AS kilogramos_orden,
-        sd.modo_cantidad
+        sd.modo_cantidad,
+
+        -- ── Campos de merma ──────────────────────────────────
+        op.kilos,
+        op.kilos_merma,
+        op.pzas,
+        op.pzas_merma
 
       FROM solicitud s
       LEFT JOIN clientes cli
@@ -187,6 +193,11 @@ export const getSeguimiento = async (req: Request, res: Response) => {
         cantidad_orden:   row.cantidad_orden   ? Number(row.cantidad_orden)   : null,
         kilogramos_orden: row.kilogramos_orden ? Number(row.kilogramos_orden) : null,
         modo_cantidad:    row.modo_cantidad    || "unidad",
+        // ── Campos de merma ──────────────────────────────────
+        kilos:       row.kilos       != null ? Number(row.kilos)       : null,
+        kilos_merma: row.kilos_merma != null ? Number(row.kilos_merma) : null,
+        pzas:        row.pzas        != null ? Number(row.pzas)        : null,
+        pzas_merma:  row.pzas_merma  != null ? Number(row.pzas_merma)  : null,
       };
     });
 
@@ -230,6 +241,7 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         op.no_produccion,
         op.fecha          AS fecha_produccion,
         dp.fecha_aprobacion AS fecha_aprobacion_diseno,
+        dp.observaciones    AS observaciones_diseno,
         tpp.material_plastico_producto  AS nombre_producto,
         pr.tipo_producto                AS categoria,
         mp.tipo_material                AS material,
@@ -257,15 +269,20 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         sd.cantidad,
         sd.kilogramos,
         sd.modo_cantidad,
-        -- datos ya calculados y guardados en orden_produccion
+        -- datos de extrusión guardados al crear la orden
         op.repeticion_extrusion,
         op.repeticion_metro,
         op.metros,
         op.ancho_bobina,
-        op.kilos,
         op.repeticion_kidder,
         op.repeticion_sicosa,
-        -- kilos y metros de extrusión (proceso)
+        op.fecha_entrega,
+        -- ── campos de merma ──────────────────────────────────
+        op.kilos,
+        op.kilos_merma,
+        op.pzas,
+        op.pzas_merma,
+        -- datos del proceso de extrusión (progreso real)
         ext.kilos_extruir,
         ext.metros_extruir
       FROM solicitud_producto sp
@@ -320,6 +337,7 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         idproduccion:            r.idproduccion            ?? null,
         fecha_produccion:        r.fecha_produccion        ?? null,
         fecha_aprobacion_diseno: r.fecha_aprobacion_diseno ?? null,
+        observaciones_diseno:    r.observaciones_diseno    || null,
         tiene_orden:             !!r.no_produccion,
         nombre_producto:         r.nombre_producto || "",
         categoria:               r.categoria       || "",
@@ -358,15 +376,20 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         cantidad:      r.cantidad   ? Number(r.cantidad)   : null,
         kilogramos:    r.kilogramos ? Number(r.kilogramos) : null,
         modo_cantidad: r.modo_cantidad || "unidad",
-        // ── datos de extrusión guardados al crear la orden ────────
+        // datos de extrusión guardados al crear la orden
         repeticion_extrusion: r.repeticion_extrusion ? Number(r.repeticion_extrusion) : null,
         repeticion_metro:     r.repeticion_metro     ? Number(r.repeticion_metro)     : null,
         metros:               r.metros               ? Number(r.metros)               : null,
         ancho_bobina:         r.ancho_bobina         ? Number(r.ancho_bobina)         : null,
-        kilos:                r.kilos                ? Number(r.kilos)                : null,
         repeticion_kidder:    r.repeticion_kidder    ?? null,
         repeticion_sicosa:    r.repeticion_sicosa    ?? null,
-        // ── datos del proceso de extrusión (progreso real) ────────
+        fecha_entrega:        r.fecha_entrega        ?? null,
+        // ── campos de merma ──────────────────────────────────
+        kilos:       r.kilos       != null ? Number(r.kilos)       : null,
+        kilos_merma: r.kilos_merma != null ? Number(r.kilos_merma) : null,
+        pzas:        r.pzas        != null ? Number(r.pzas)        : null,
+        pzas_merma:  r.pzas_merma  != null ? Number(r.pzas_merma)  : null,
+        // datos del proceso de extrusión (progreso real)
         kilos_extruir:  r.kilos_extruir  ? Number(r.kilos_extruir)  : null,
         metros_extruir: r.metros_extruir ? Number(r.metros_extruir) : null,
       };

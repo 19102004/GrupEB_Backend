@@ -9,7 +9,6 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
   try {
     const { noPedido } = req.params;
 
-    // Info base del pedido y cliente
     const { rows: pedidoRows } = await pool.query(`
       SELECT
         s.idsolicitud,
@@ -31,15 +30,14 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
 
     const pedido = pedidoRows[0];
 
-    // Todos los productos con su orden de producción individual
     const { rows: productos } = await pool.query(`
       SELECT
         sp.idsolicitud_producto,
 
-        -- Orden de producción vinculada a este producto específico
+        -- Orden de producción
         op.idproduccion,
         op.no_produccion,
-        op.fecha          AS fecha_produccion,
+        op.fecha            AS fecha_produccion,
 
         -- Producto
         tpp.material_plastico_producto  AS nombre_producto,
@@ -74,11 +72,36 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         -- Cantidad aprobada por el cliente
         sd.cantidad,
         sd.kilogramos,
-        sd.modo_cantidad
+        sd.modo_cantidad,
+
+        -- Fecha aprobación diseño
+        dp.fecha_aprobacion AS fecha_aprobacion_diseno,
+        dp.observaciones    AS observaciones_diseno,
+
+        -- Datos de extrusión calculados al crear la orden
+        op.repeticion_extrusion,
+        op.repeticion_metro,
+        op.metros,
+        op.ancho_bobina,
+        op.repeticion_kidder,
+        op.repeticion_sicosa,
+        op.fecha_entrega,
+
+        -- ── Campos de merma ──────────────────────────────────
+        op.kilos,
+        op.kilos_merma,
+        op.pzas,
+        op.pzas_merma,
+
+        -- Progreso real de extrusión
+        ext.kilos_extruir,
+        ext.metros_extruir
 
       FROM solicitud_producto sp
       LEFT JOIN orden_produccion op
           ON op.idsolicitud_producto = sp.idsolicitud_producto
+      LEFT JOIN diseno_producto dp
+          ON dp.solicitud_producto_idsolicitud_producto = sp.idsolicitud_producto
       LEFT JOIN configuracion_plastico cfg
           ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
       LEFT JOIN tipo_producto_plastico tpp
@@ -98,6 +121,8 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
       LEFT JOIN solicitud_detalle sd
           ON sd.solicitud_producto_id = sp.idsolicitud_producto
           AND sd.aprobado = true
+      LEFT JOIN extrusion ext
+          ON ext.orden_produccion_idproduccion = op.idproduccion
       WHERE sp.solicitud_idsolicitud = $1
       ORDER BY sp.idsolicitud_producto
     `, [pedido.idsolicitud]);
@@ -122,10 +147,12 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         idsolicitud_producto: r.idsolicitud_producto,
 
         // Orden de producción
-        no_produccion:    r.no_produccion    ?? null,
-        idproduccion:     r.idproduccion     ?? null,
-        fecha_produccion: r.fecha_produccion ?? null,
-        tiene_orden:      !!r.no_produccion,
+        no_produccion:           r.no_produccion           ?? null,
+        idproduccion:            r.idproduccion            ?? null,
+        fecha_produccion:        r.fecha_produccion        ?? null,
+        fecha_aprobacion_diseno: r.fecha_aprobacion_diseno ?? null,
+        observaciones_diseno:    r.observaciones_diseno    || null,
+        tiene_orden:             !!r.no_produccion,
 
         // Producto
         nombre_producto: r.nombre_producto || "",
@@ -143,7 +170,6 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         refuerzo,
         por_kilo:      r.por_kilo ? String(r.por_kilo) : null,
 
-        // Medidas para cálculo de rodillo
         medidas: {
           altura,
           ancho,
@@ -173,6 +199,25 @@ export const getOrdenProduccion = async (req: Request, res: Response) => {
         cantidad:      r.cantidad   ? Number(r.cantidad)   : null,
         kilogramos:    r.kilogramos ? Number(r.kilogramos) : null,
         modo_cantidad: r.modo_cantidad || "unidad",
+
+        // Datos de extrusión guardados al crear la orden
+        repeticion_extrusion: r.repeticion_extrusion ? Number(r.repeticion_extrusion) : null,
+        repeticion_metro:     r.repeticion_metro     ? Number(r.repeticion_metro)     : null,
+        metros:               r.metros               ? Number(r.metros)               : null,
+        ancho_bobina:         r.ancho_bobina         ? Number(r.ancho_bobina)         : null,
+        repeticion_kidder:    r.repeticion_kidder    ?? null,
+        repeticion_sicosa:    r.repeticion_sicosa    ?? null,
+        fecha_entrega:        r.fecha_entrega        ?? null,
+
+        // ── Campos de merma ───────────────────────────────────
+        kilos:       r.kilos       != null ? Number(r.kilos)       : null,
+        kilos_merma: r.kilos_merma != null ? Number(r.kilos_merma) : null,
+        pzas:        r.pzas        != null ? Number(r.pzas)        : null,
+        pzas_merma:  r.pzas_merma  != null ? Number(r.pzas_merma)  : null,
+
+        // Progreso real de extrusión
+        kilos_extruir:  r.kilos_extruir  ? Number(r.kilos_extruir)  : null,
+        metros_extruir: r.metros_extruir ? Number(r.metros_extruir) : null,
       };
     });
 

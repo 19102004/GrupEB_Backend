@@ -10,7 +10,6 @@ const ESTADO = {
   PAGADO:          6,
 } as const;
 
-// ── Helper: generar folio de orden de producción ─────────────
 async function generarNoProduccion(client: any): Promise<string> {
   const anio = new Date().getFullYear().toString().slice(-2);
   const { rows } = await client.query(
@@ -20,6 +19,43 @@ async function generarNoProduccion(client: any): Promise<string> {
   );
   const siguiente = Number(rows[0].total) + 1;
   return `OP${anio}${String(siguiente).padStart(3, "0")}`;
+}
+
+// ============================================================
+// OBTENER MERMA SEGÚN RANGO DE KILOS + TINTAS
+// ============================================================
+
+async function obtenerMerma(
+  client:   any,
+  kilos:    number,
+  tintasId: number
+): Promise<number> {
+  if (!kilos || kilos <= 0) return 0;
+
+  try {
+    const { rows } = await client.query(`
+      SELECT tp.merma_porcentaje
+      FROM tarifas_produccion tp
+      INNER JOIN kilogramos k ON k.idkilogramos = tp.kilogramos_idkilogramos
+      WHERE tp.tintas_idtintas = $1
+        AND $2 >= k.kg_min
+        AND ($2 <= k.kg_max OR k.kg_max IS NULL)
+      LIMIT 1
+    `, [tintasId, kilos]);
+
+    if (rows.length === 0) {
+      console.warn(`⚠️ No se encontró tarifa de merma para ${kilos} kg / tintas_id=${tintasId} — se usará 0%`);
+      return 0;
+    }
+
+    const merma = Number(rows[0].merma_porcentaje);
+    console.log(`📊 Merma para ${kilos} kg + tintas_id=${tintasId} → ${merma}%`);
+    return merma;
+
+  } catch (err: any) {
+    console.warn("⚠️ obtenerMerma error:", err.message);
+    return 0;
+  }
 }
 
 // ============================================================
@@ -164,7 +200,8 @@ async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
       COALESCE(cfg.refuerzo,     0) AS refuerzo,
       COALESCE(sd.cantidad,      0) AS cantidad,
       sd.kilogramos,
-      sd.modo_cantidad
+      sd.modo_cantidad,
+      sp.tintas_idtintas
     FROM solicitud_producto sp
     JOIN configuracion_plastico cfg
         ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
@@ -188,6 +225,9 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
       metros:               null,
       ancho_bobina:         null,
       kilos:                null,
+      kilos_merma:          null,
+      pzas:                 null,
+      pzas_merma:           null,
       repeticion_kidder:    null,
       repeticion_sicosa:    null,
     };
@@ -195,6 +235,22 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
 
   const cantidad = Number(medidas.cantidad);
   const kilos    = medidas.kilogramos ? parseFloat(Number(medidas.kilogramos).toFixed(4)) : null;
+  const tintasId = Number(medidas.tintas_idtintas) || 1;
+
+  // ── Calcular merma según rango de kilos + tintas ─────────
+  const mermaPct    = kilos ? await obtenerMerma(client, kilos, tintasId) : 0;
+  const factorMerma = 1 + mermaPct / 100;
+
+  const kilos_merma = kilos
+    ? parseFloat((kilos * factorMerma).toFixed(2))
+    : null;
+
+  const pzas       = cantidad > 0 ? cantidad : null;
+  const pzas_merma = pzas
+    ? Math.round(pzas * factorMerma)
+    : null;
+
+  console.log(`🧮 Merma [${idsolicitudProducto}] tintas_id=${tintasId} → ${mermaPct}% | kilos: ${kilos} → ${kilos_merma} | pzas: ${pzas} → ${pzas_merma}`);
 
   if (cantidad <= 0) {
     return {
@@ -203,6 +259,9 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
       metros:               null,
       ancho_bobina:         null,
       kilos,
+      kilos_merma,
+      pzas,
+      pzas_merma,
       repeticion_kidder:    null,
       repeticion_sicosa:    null,
     };
@@ -230,6 +289,9 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
     metros:               ext.metros,
     ancho_bobina:         ext.ancho_bobina,
     kilos,
+    kilos_merma,
+    pzas,
+    pzas_merma,
     repeticion_kidder:    rodillos.kidder,
     repeticion_sicosa:    rodillos.sicosa,
   };
@@ -257,15 +319,14 @@ async function generarOrdenesPendientes(
 
   for (const prod of pendientes) {
     const noProduccion = await generarNoProduccion(client);
-
-    // ── Calcular datos de extrusión y rodillos ANTES de insertar ──
-    const datosOrden = await prepararDatosOrden(client, prod.idsolicitud_producto);
+    const datosOrden   = await prepararDatosOrden(client, prod.idsolicitud_producto);
 
     await client.query(
       `INSERT INTO orden_produccion (
         estado_administrativo_cat_idestado_administrativo_cat,
         no_produccion,
         fecha,
+        fecha_entrega,
         idsolicitud,
         idsolicitud_producto,
         idestado_produccion_cat,
@@ -274,9 +335,12 @@ async function generarOrdenesPendientes(
         metros,
         ancho_bobina,
         kilos,
+        kilos_merma,
+        pzas,
+        pzas_merma,
         repeticion_kidder,
         repeticion_sicosa
-      ) VALUES ($1,$2,NOW(),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      ) VALUES ($1,$2,NOW(),NOW() + INTERVAL '35 days',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [
         ESTADO.PENDIENTE,
         noProduccion,
@@ -288,13 +352,16 @@ async function generarOrdenesPendientes(
         datosOrden.metros,
         datosOrden.ancho_bobina,
         datosOrden.kilos,
+        datosOrden.kilos_merma,
+        datosOrden.pzas,
+        datosOrden.pzas_merma,
         datosOrden.repeticion_kidder,
         datosOrden.repeticion_sicosa,
       ]
     );
 
     ordenesCreadas.push(noProduccion);
-    console.log(`✅ Orden ${noProduccion} creada automáticamente al cubrir anticipo`);
+    console.log(`✅ Orden ${noProduccion} creada con merma correcta (kg+tintas)`);
   }
 
   return ordenesCreadas;
@@ -309,23 +376,13 @@ export const getVentas = async (req: Request, res: Response) => {
       SELECT
         v.idventas,
         v.solicitud_idsolicitud,
-        v.subtotal,
-        v.iva,
-        v.total,
-        v.anticipo,
-        v.saldo,
-        v.abono,
-        v.fecha_creacion,
-        v.fecha_liquidacion,
+        v.subtotal, v.iva, v.total, v.anticipo, v.saldo, v.abono,
+        v.fecha_creacion, v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
         est.nombre    AS estado_nombre,
-        s.no_pedido,
-        s.no_cotizacion,
+        s.no_pedido, s.no_cotizacion,
         s.fecha       AS fecha_pedido,
-        cli.razon_social AS cliente,
-        cli.empresa,
-        cli.telefono,
-        cli.correo
+        cli.razon_social AS cliente, cli.empresa, cli.telefono, cli.correo
       FROM ventas v
       JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
       JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
@@ -341,33 +398,20 @@ export const getVentas = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// OBTENER UNA VENTA POR ID (con detalle de pagos)
+// OBTENER UNA VENTA POR ID
 // ============================================================
 export const getVentaById = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
     const { rows: ventaRows } = await pool.query(`
       SELECT
-        v.idventas,
-        v.solicitud_idsolicitud,
-        v.subtotal,
-        v.iva,
-        v.total,
-        v.anticipo,
-        v.saldo,
-        v.abono,
-        v.fecha_creacion,
-        v.fecha_liquidacion,
+        v.idventas, v.solicitud_idsolicitud,
+        v.subtotal, v.iva, v.total, v.anticipo, v.saldo, v.abono,
+        v.fecha_creacion, v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
-        est.nombre    AS estado_nombre,
-        s.no_pedido,
-        s.no_cotizacion,
-        s.fecha       AS fecha_pedido,
-        cli.razon_social AS cliente,
-        cli.empresa,
-        cli.telefono,
-        cli.correo
+        est.nombre AS estado_nombre,
+        s.no_pedido, s.no_cotizacion, s.fecha AS fecha_pedido,
+        cli.razon_social AS cliente, cli.empresa, cli.telefono, cli.correo
       FROM ventas v
       JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
       JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
@@ -376,18 +420,11 @@ export const getVentaById = async (req: Request, res: Response) => {
       WHERE v.idventas = $1
     `, [id]);
 
-    if (ventaRows.length === 0)
-      return res.status(404).json({ error: "Venta no encontrada" });
+    if (ventaRows.length === 0) return res.status(404).json({ error: "Venta no encontrada" });
 
     const { rows: pagos } = await pool.query(`
-      SELECT
-        vp.idventa_pago,
-        vp.monto,
-        vp.es_anticipo,
-        vp.observacion,
-        vp.fecha,
-        mp.tipo_pago AS metodo_pago,
-        mp.idmetodo_pago
+      SELECT vp.idventa_pago, vp.monto, vp.es_anticipo, vp.observacion, vp.fecha,
+             mp.tipo_pago AS metodo_pago, mp.idmetodo_pago
       FROM venta_pago vp
       JOIN metodo_pago mp ON mp.idmetodo_pago = vp.metodo_pago_idmetodo_pago
       WHERE vp.ventas_idventas = $1
@@ -407,28 +444,15 @@ export const getVentaById = async (req: Request, res: Response) => {
 export const getVentaByPedido = async (req: Request, res: Response) => {
   try {
     const { noPedido } = req.params;
-
     const { rows: ventaRows } = await pool.query(`
       SELECT
-        v.idventas,
-        v.solicitud_idsolicitud,
-        v.subtotal,
-        v.iva,
-        v.total,
-        v.anticipo,
-        v.saldo,
-        v.abono,
-        v.fecha_creacion,
-        v.fecha_liquidacion,
+        v.idventas, v.solicitud_idsolicitud,
+        v.subtotal, v.iva, v.total, v.anticipo, v.saldo, v.abono,
+        v.fecha_creacion, v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
-        est.nombre    AS estado_nombre,
-        s.no_pedido,
-        s.no_cotizacion,
-        s.fecha       AS fecha_pedido,
-        cli.razon_social AS cliente,
-        cli.empresa,
-        cli.telefono,
-        cli.correo
+        est.nombre AS estado_nombre,
+        s.no_pedido, s.no_cotizacion, s.fecha AS fecha_pedido,
+        cli.razon_social AS cliente, cli.empresa, cli.telefono, cli.correo
       FROM ventas v
       JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
       JOIN clientes cli  ON cli.idclientes = s.clientes_idclientes
@@ -437,18 +461,11 @@ export const getVentaByPedido = async (req: Request, res: Response) => {
       WHERE s.no_pedido = $1
     `, [noPedido]);
 
-    if (ventaRows.length === 0)
-      return res.status(404).json({ error: "Venta no encontrada para este pedido" });
+    if (ventaRows.length === 0) return res.status(404).json({ error: "Venta no encontrada para este pedido" });
 
     const { rows: pagos } = await pool.query(`
-      SELECT
-        vp.idventa_pago,
-        vp.monto,
-        vp.es_anticipo,
-        vp.observacion,
-        vp.fecha,
-        mp.tipo_pago AS metodo_pago,
-        mp.idmetodo_pago
+      SELECT vp.idventa_pago, vp.monto, vp.es_anticipo, vp.observacion, vp.fecha,
+             mp.tipo_pago AS metodo_pago, mp.idmetodo_pago
       FROM venta_pago vp
       JOIN metodo_pago mp ON mp.idmetodo_pago = vp.metodo_pago_idmetodo_pago
       WHERE vp.ventas_idventas = $1
@@ -504,7 +521,6 @@ export const registrarPago = async (req: Request, res: Response) => {
     if (nuevoSaldo <= 0)             nuevoEstado = ESTADO.PAGADO;
     else if (nuevoAbono >= anticipo) nuevoEstado = ESTADO.ANTICIPO_PAGADO;
 
-    // 1️⃣ Insertar pago
     await client.query(
       `INSERT INTO venta_pago (
         ventas_idventas, metodo_pago_idmetodo_pago,
@@ -513,7 +529,6 @@ export const registrarPago = async (req: Request, res: Response) => {
       [id, metodoPagoId, montoNum, esAnticipoReal, observacion]
     );
 
-    // 2️⃣ Actualizar ventas
     await client.query(
       `UPDATE ventas
        SET abono  = $1,
@@ -524,7 +539,6 @@ export const registrarPago = async (req: Request, res: Response) => {
       [nuevoAbono, nuevoSaldo, nuevoEstado, id]
     );
 
-    // 3️⃣ Si se cubre el anticipo, generar órdenes con datos completos
     let ordenesGeneradas: string[] = [];
     if (anticipoAhoraCubierto) {
       ordenesGeneradas = await generarOrdenesPendientes(client, solicitudId);
@@ -533,15 +547,15 @@ export const registrarPago = async (req: Request, res: Response) => {
     await client.query("COMMIT");
 
     return res.json({
-      message:            "Pago registrado exitosamente",
-      abono_total:        nuevoAbono,
-      saldo:              nuevoSaldo,
-      estado_id:          nuevoEstado,
-      pagado:             nuevoSaldo <= 0,
-      anticipo_cubierto:  anticipoAhoraCubierto,
-      es_anticipo:        esAnticipoReal,
-      liquidado:          esLiquidacion,
-      ordenes_generadas:  ordenesGeneradas,
+      message:           "Pago registrado exitosamente",
+      abono_total:       nuevoAbono,
+      saldo:             nuevoSaldo,
+      estado_id:         nuevoEstado,
+      pagado:            nuevoSaldo <= 0,
+      anticipo_cubierto: anticipoAhoraCubierto,
+      es_anticipo:       esAnticipoReal,
+      liquidado:         esLiquidacion,
+      ordenes_generadas: ordenesGeneradas,
     });
 
   } catch (error: any) {
@@ -560,35 +574,28 @@ export const eliminarPago = async (req: Request, res: Response) => {
   const client = await pool.connect();
   try {
     const { id } = req.params;
-
     await client.query("BEGIN");
 
     const { rows: pagoRows } = await client.query(
-      `SELECT idventa_pago, ventas_idventas, monto FROM venta_pago WHERE idventa_pago = $1`,
-      [id]
+      `SELECT idventa_pago, ventas_idventas, monto FROM venta_pago WHERE idventa_pago = $1`, [id]
     );
-
     if (pagoRows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Pago no encontrado" });
     }
 
     const ventaId = pagoRows[0].ventas_idventas;
-
     await client.query(`DELETE FROM venta_pago WHERE idventa_pago = $1`, [id]);
 
     const { rows: sumaRows } = await client.query(
       `SELECT COALESCE(SUM(monto), 0) AS total_abonado FROM venta_pago WHERE ventas_idventas = $1`,
       [ventaId]
     );
-
     const nuevoAbono = Number(sumaRows[0].total_abonado);
 
     const { rows: ventaRows } = await client.query(
-      `SELECT total, anticipo FROM ventas WHERE idventas = $1`,
-      [ventaId]
+      `SELECT total, anticipo FROM ventas WHERE idventas = $1`, [ventaId]
     );
-
     const total      = Number(ventaRows[0].total);
     const anticipo   = Number(ventaRows[0].anticipo);
     const nuevoSaldo = Number((total - nuevoAbono).toFixed(2));
@@ -601,8 +608,7 @@ export const eliminarPago = async (req: Request, res: Response) => {
 
     await client.query(
       `UPDATE ventas
-       SET abono = $1,
-           saldo = $2,
+       SET abono = $1, saldo = $2,
            estado_administrativo_cat_idestado_administrativo_cat = $3,
            fecha_liquidacion = $4
        WHERE idventas = $5`,
@@ -610,14 +616,7 @@ export const eliminarPago = async (req: Request, res: Response) => {
     );
 
     await client.query("COMMIT");
-
-    return res.json({
-      message:     "Pago eliminado y saldo recalculado",
-      abono_total: nuevoAbono,
-      saldo:       nuevoSaldo,
-      estado_id:   nuevoEstado,
-      liquidado:   estaLiquidado,
-    });
+    return res.json({ message: "Pago eliminado y saldo recalculado", abono_total: nuevoAbono, saldo: nuevoSaldo, estado_id: nuevoEstado, liquidado: estaLiquidado });
 
   } catch (error: any) {
     await client.query("ROLLBACK");
