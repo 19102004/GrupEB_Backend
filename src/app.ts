@@ -23,6 +23,9 @@ import suajesRoutes  from "./routes/suajes/suajes.routes";
 import seguimientoRoutes from "./routes/seguimiento/seguimiento.routes";
 import rodillosRoutes from "./routes/rodillos/rodillos.routes";
 import procesosRoutes from "./routes/procesos/procesos.routes";
+import estadoCuentaRoutes from "./routes/estadoCuenta/estadoCuenta.routes";
+import bultosRoutes from "./routes/seguimiento/bultos.routes";
+
 
 const app = express();
 
@@ -61,6 +64,8 @@ app.use("/api", suajesRoutes);
 app.use("/api/seguimiento", seguimientoRoutes);
 app.use("/api/rodillos", rodillosRoutes);
 app.use("/api/procesos", procesosRoutes);
+app.use("/api/estado-cuenta", estadoCuentaRoutes);
+app.use("/api/seguimiento/:idproduccion/bultos", bultosRoutes); // Rutas de bultos anidadas bajo seguimiento
 
 // ==========================
 // HEALTH CHECK

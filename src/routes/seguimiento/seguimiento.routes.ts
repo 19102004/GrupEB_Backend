@@ -3,6 +3,7 @@ import { getSeguimiento } from "../../controllers/seguimiento/seguimiento.contro
 import { getOrdenProduccion } from "../../controllers/seguimiento/getOrdenProduccion.controller";
 import { authMiddleware } from "../../middlewares/auth.middleware";
 
+
 const router = Router();
 
 // GET /api/seguimiento

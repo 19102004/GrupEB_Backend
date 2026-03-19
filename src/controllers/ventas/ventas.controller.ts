@@ -13,25 +13,15 @@ const ESTADO = {
 async function generarNoProduccion(client: any): Promise<string> {
   const anio = new Date().getFullYear().toString().slice(-2);
   const { rows } = await client.query(
-    `SELECT COUNT(*) AS total FROM orden_produccion 
-     WHERE no_produccion::text LIKE $1`,
+    `SELECT COUNT(*) AS total FROM orden_produccion WHERE no_produccion::text LIKE $1`,
     [`OP${anio}%`]
   );
   const siguiente = Number(rows[0].total) + 1;
   return `OP${anio}${String(siguiente).padStart(3, "0")}`;
 }
 
-// ============================================================
-// OBTENER MERMA SEGÚN RANGO DE KILOS + TINTAS
-// ============================================================
-
-async function obtenerMerma(
-  client:   any,
-  kilos:    number,
-  tintasId: number
-): Promise<number> {
+async function obtenerMerma(client: any, kilos: number, tintasId: number): Promise<number> {
   if (!kilos || kilos <= 0) return 0;
-
   try {
     const { rows } = await client.query(`
       SELECT tp.merma_porcentaje
@@ -42,42 +32,26 @@ async function obtenerMerma(
         AND ($2 <= k.kg_max OR k.kg_max IS NULL)
       LIMIT 1
     `, [tintasId, kilos]);
-
     if (rows.length === 0) {
       console.warn(`⚠️ No se encontró tarifa de merma para ${kilos} kg / tintas_id=${tintasId} — se usará 0%`);
       return 0;
     }
-
     const merma = Number(rows[0].merma_porcentaje);
     console.log(`📊 Merma para ${kilos} kg + tintas_id=${tintasId} → ${merma}%`);
     return merma;
-
   } catch (err: any) {
     console.warn("⚠️ obtenerMerma error:", err.message);
     return 0;
   }
 }
 
-// ============================================================
-// CÁLCULOS DE EXTRUSIÓN
-// ============================================================
-
 function calcularDatosExtrusion(p: {
-  alto:          number;
-  ancho:         number;
-  fuelle_fondo:  number;
-  fuelle_lat_iz: number;
-  fuelle_lat_de: number;
-  refuerzo:      number;
-  cantidad:      number;
-}): {
-  repeticion_extrusion: number;
-  repeticion_metro:     number;
-  metros:               number;
-  ancho_bobina:         number;
-} {
+  alto: number; ancho: number;
+  fuelle_fondo: number; fuelle_lat_iz: number; fuelle_lat_de: number;
+  refuerzo: number; cantidad: number;
+}): { repeticion_extrusion: number; repeticion_metro: number; metros: number; ancho_bobina: number } {
   let repeticion_extrusion: number;
-  let ancho_bobina:         number;
+  let ancho_bobina: number;
 
   if (p.fuelle_fondo > 0) {
     repeticion_extrusion = p.ancho;
@@ -88,9 +62,7 @@ function calcularDatosExtrusion(p: {
   }
 
   const repeticion_metro = repeticion_extrusion > 0
-    ? parseFloat((100 / repeticion_extrusion).toFixed(4))
-    : 0;
-
+    ? parseFloat((100 / repeticion_extrusion).toFixed(4)) : 0;
   const metros = parseFloat((p.cantidad * (repeticion_extrusion / 100)).toFixed(1));
 
   return {
@@ -102,69 +74,36 @@ function calcularDatosExtrusion(p: {
 }
 
 async function buscarRepeticionRodillos(
-  client: any,
-  valor: number
+  client: any, valor: number
 ): Promise<{ kidder: string | null; sicosa: string | null }> {
   if (!valor || valor <= 0) return { kidder: null, sicosa: null };
-
   try {
     const { rows: kidderRows } = await client.query(`
-      SELECT
-        sin_grabado,
-        con_grabado_1rep,
-        con_grabado_2rep,
-        con_grabado_3rep,
-        LEAST(
-          ABS(con_grabado_1rep - $1),
-          ABS(con_grabado_2rep - $1),
-          ABS(con_grabado_3rep - $1)
-        ) AS distancia_min
-      FROM rodillos_kidder
-      ORDER BY distancia_min ASC
-      LIMIT 1
+      SELECT sin_grabado, con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+        LEAST(ABS(con_grabado_1rep-$1),ABS(con_grabado_2rep-$1),ABS(con_grabado_3rep-$1)) AS distancia_min
+      FROM rodillos_kidder ORDER BY distancia_min ASC LIMIT 1
     `, [valor]);
 
     const { rows: sicosaRows } = await client.query(`
-      SELECT
-        sin_grabado,
-        con_grabado_1rep,
-        con_grabado_2rep,
-        con_grabado_3rep,
-        con_grabado_4rep,
-        con_grabado_5rep,
-        LEAST(
-          ABS(con_grabado_1rep - $1),
-          ABS(con_grabado_2rep - $1),
-          ABS(con_grabado_3rep - $1),
-          ABS(con_grabado_4rep - $1),
-          ABS(con_grabado_5rep - $1)
-        ) AS distancia_min
-      FROM rodillos_sicosa
-      ORDER BY distancia_min ASC
-      LIMIT 1
+      SELECT sin_grabado, con_grabado_1rep, con_grabado_2rep, con_grabado_3rep,
+             con_grabado_4rep, con_grabado_5rep,
+        LEAST(ABS(con_grabado_1rep-$1),ABS(con_grabado_2rep-$1),ABS(con_grabado_3rep-$1),
+              ABS(con_grabado_4rep-$1),ABS(con_grabado_5rep-$1)) AS distancia_min
+      FROM rodillos_sicosa ORDER BY distancia_min ASC LIMIT 1
     `, [valor]);
 
-    const formatearRodillo = (
-      row: any,
-      reps: { label: string; col: string }[]
-    ): string | null => {
+    const formatearRodillo = (row: any, reps: { label: string; col: string }[]): string | null => {
       if (!row) return null;
-
       const candidatos = reps
         .map(r => ({ label: r.label, valor: parseFloat(row[r.col]) || 0 }))
         .filter(r => r.valor > 0);
-
       if (candidatos.length === 0) return null;
-
       const mejor = candidatos.reduce((prev, curr) =>
         Math.abs(curr.valor - valor) < Math.abs(prev.valor - valor) ? curr : prev
       );
-
       const sinGrab  = parseFloat(row.sin_grabado).toFixed(2);
       const esExacto = Math.abs(mejor.valor - valor) < 0.001;
-      const prefijo  = esExacto ? "" : "~";
-
-      return `SG=${sinGrab} | ${prefijo}${mejor.valor.toFixed(2)} (${mejor.label})`;
+      return `SG=${sinGrab} | ${esExacto ? "" : "~"}${mejor.valor.toFixed(2)} (${mejor.label})`;
     };
 
     const kidder = formatearRodillo(kidderRows[0], [
@@ -172,7 +111,6 @@ async function buscarRepeticionRodillos(
       { label: "2 rep", col: "con_grabado_2rep" },
       { label: "3 rep", col: "con_grabado_3rep" },
     ]);
-
     const sicosa = formatearRodillo(sicosaRows[0], [
       { label: "1 rep", col: "con_grabado_1rep" },
       { label: "2 rep", col: "con_grabado_2rep" },
@@ -180,9 +118,7 @@ async function buscarRepeticionRodillos(
       { label: "4 rep", col: "con_grabado_4rep" },
       { label: "5 rep", col: "con_grabado_5rep" },
     ]);
-
     return { kidder, sicosa };
-
   } catch (err: any) {
     console.warn("⚠️ buscarRepeticionRodillos error:", err.message);
     return { kidder: null, sicosa: null };
@@ -211,7 +147,6 @@ async function getMedidasParaOrden(client: any, idsolicitudProducto: number) {
     WHERE sp.idsolicitud_producto = $1
     LIMIT 1
   `, [idsolicitudProducto]);
-
   return rows[0] ?? null;
 }
 
@@ -220,16 +155,10 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
 
   if (!medidas) {
     return {
-      repeticion_extrusion: null,
-      repeticion_metro:     null,
-      metros:               null,
-      ancho_bobina:         null,
-      kilos:                null,
-      kilos_merma:          null,
-      pzas:                 null,
-      pzas_merma:           null,
-      repeticion_kidder:    null,
-      repeticion_sicosa:    null,
+      repeticion_extrusion: null, repeticion_metro: null,
+      metros: null, metros_merma: null, ancho_bobina: null,
+      kilos: null, kilos_merma: null, pzas: null, pzas_merma: null,
+      repeticion_kidder: null, repeticion_sicosa: null,
     };
   }
 
@@ -237,33 +166,21 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
   const kilos    = medidas.kilogramos ? parseFloat(Number(medidas.kilogramos).toFixed(4)) : null;
   const tintasId = Number(medidas.tintas_idtintas) || 1;
 
-  // ── Calcular merma según rango de kilos + tintas ─────────
   const mermaPct    = kilos ? await obtenerMerma(client, kilos, tintasId) : 0;
   const factorMerma = 1 + mermaPct / 100;
 
-  const kilos_merma = kilos
-    ? parseFloat((kilos * factorMerma).toFixed(2))
-    : null;
-
-  const pzas       = cantidad > 0 ? cantidad : null;
-  const pzas_merma = pzas
-    ? Math.round(pzas * factorMerma)
-    : null;
+  const kilos_merma = kilos ? parseFloat((kilos * factorMerma).toFixed(2)) : null;
+  const pzas        = cantidad > 0 ? cantidad : null;
+  const pzas_merma  = pzas ? Math.round(pzas * factorMerma) : null;
 
   console.log(`🧮 Merma [${idsolicitudProducto}] tintas_id=${tintasId} → ${mermaPct}% | kilos: ${kilos} → ${kilos_merma} | pzas: ${pzas} → ${pzas_merma}`);
 
   if (cantidad <= 0) {
     return {
-      repeticion_extrusion: null,
-      repeticion_metro:     null,
-      metros:               null,
-      ancho_bobina:         null,
-      kilos,
-      kilos_merma,
-      pzas,
-      pzas_merma,
-      repeticion_kidder:    null,
-      repeticion_sicosa:    null,
+      repeticion_extrusion: null, repeticion_metro: null,
+      metros: null, metros_merma: null, ancho_bobina: null,
+      kilos, kilos_merma, pzas, pzas_merma,
+      repeticion_kidder: null, repeticion_sicosa: null,
     };
   }
 
@@ -277,36 +194,30 @@ async function prepararDatosOrden(client: any, idsolicitudProducto: number) {
     cantidad,
   });
 
-  console.log(`📐 Orden [${idsolicitudProducto}] → rep=${ext.repeticion_extrusion} | metros=${ext.metros} | bobina=${ext.ancho_bobina}`);
+  const metros_merma = parseFloat((ext.metros * factorMerma).toFixed(1));
+
+  console.log(`📐 Orden [${idsolicitudProducto}] → rep=${ext.repeticion_extrusion} | metros=${ext.metros} | metros_merma=${metros_merma} | bobina=${ext.ancho_bobina}`);
 
   const rodillos = await buscarRepeticionRodillos(client, ext.repeticion_extrusion);
-
   console.log(`🎡 Rodillos → KIDDER: ${rodillos.kidder} | SICOSA: ${rodillos.sicosa}`);
 
   return {
     repeticion_extrusion: ext.repeticion_extrusion,
     repeticion_metro:     ext.repeticion_metro,
     metros:               ext.metros,
+    metros_merma,
     ancho_bobina:         ext.ancho_bobina,
-    kilos,
-    kilos_merma,
-    pzas,
-    pzas_merma,
+    kilos, kilos_merma, pzas, pzas_merma,
     repeticion_kidder:    rodillos.kidder,
     repeticion_sicosa:    rodillos.sicosa,
   };
 }
 
-// ── Helper: generar órdenes pendientes al cubrir anticipo ────
-async function generarOrdenesPendientes(
-  client:      any,
-  solicitudId: number
-): Promise<string[]> {
+async function generarOrdenesPendientes(client: any, solicitudId: number): Promise<string[]> {
   const { rows: pendientes } = await client.query(`
     SELECT dp.solicitud_producto_idsolicitud_producto AS idsolicitud_producto
     FROM diseno d
-    JOIN diseno_producto dp
-        ON dp.diseno_iddiseno = d.iddiseno
+    JOIN diseno_producto dp ON dp.diseno_iddiseno = d.iddiseno
     WHERE d.solicitud_idsolicitud = $1
       AND dp.estado_administrativo_cat_idestado_administrativo_cat = $2
       AND NOT EXISTS (
@@ -321,6 +232,7 @@ async function generarOrdenesPendientes(
     const noProduccion = await generarNoProduccion(client);
     const datosOrden   = await prepararDatosOrden(client, prod.idsolicitud_producto);
 
+    // ✅ 18 columnas, 16 parámetros $n (NOW() y NOW()+INTERVAL no son $n)
     await client.query(
       `INSERT INTO orden_produccion (
         estado_administrativo_cat_idestado_administrativo_cat,
@@ -333,6 +245,7 @@ async function generarOrdenesPendientes(
         repeticion_extrusion,
         repeticion_metro,
         metros,
+        metros_merma,
         ancho_bobina,
         kilos,
         kilos_merma,
@@ -340,28 +253,29 @@ async function generarOrdenesPendientes(
         pzas_merma,
         repeticion_kidder,
         repeticion_sicosa
-      ) VALUES ($1,$2,NOW(),NOW() + INTERVAL '35 days',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      ) VALUES ($1,$2,NOW(),NOW() + INTERVAL '35 days',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
-        ESTADO.PENDIENTE,
-        noProduccion,
-        solicitudId,
-        prod.idsolicitud_producto,
-        ESTADO.PENDIENTE,
-        datosOrden.repeticion_extrusion,
-        datosOrden.repeticion_metro,
-        datosOrden.metros,
-        datosOrden.ancho_bobina,
-        datosOrden.kilos,
-        datosOrden.kilos_merma,
-        datosOrden.pzas,
-        datosOrden.pzas_merma,
-        datosOrden.repeticion_kidder,
-        datosOrden.repeticion_sicosa,
+        ESTADO.PENDIENTE,                   // $1
+        noProduccion,                       // $2
+        solicitudId,                        // $3
+        prod.idsolicitud_producto,          // $4
+        ESTADO.PENDIENTE,                   // $5
+        datosOrden.repeticion_extrusion,    // $6
+        datosOrden.repeticion_metro,        // $7
+        datosOrden.metros,                  // $8
+        datosOrden.metros_merma,            // $9
+        datosOrden.ancho_bobina,            // $10
+        datosOrden.kilos,                   // $11
+        datosOrden.kilos_merma,             // $12
+        datosOrden.pzas,                    // $13
+        datosOrden.pzas_merma,              // $14
+        datosOrden.repeticion_kidder,       // $15
+        datosOrden.repeticion_sicosa,       // $16
       ]
     );
 
     ordenesCreadas.push(noProduccion);
-    console.log(`✅ Orden ${noProduccion} creada con merma correcta (kg+tintas)`);
+    console.log(`✅ Orden ${noProduccion} creada con metros_merma incluido`);
   }
 
   return ordenesCreadas;
@@ -374,14 +288,13 @@ export const getVentas = async (req: Request, res: Response) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-        v.idventas,
-        v.solicitud_idsolicitud,
+        v.idventas, v.solicitud_idsolicitud,
         v.subtotal, v.iva, v.total, v.anticipo, v.saldo, v.abono,
         v.fecha_creacion, v.fecha_liquidacion,
         v.estado_administrativo_cat_idestado_administrativo_cat AS estado_id,
-        est.nombre    AS estado_nombre,
+        est.nombre AS estado_nombre,
         s.no_pedido, s.no_cotizacion,
-        s.fecha       AS fecha_pedido,
+        s.fecha    AS fecha_pedido,
         cli.razon_social AS cliente, cli.empresa, cli.telefono, cli.correo
       FROM ventas v
       JOIN solicitud s   ON s.idsolicitud = v.solicitud_idsolicitud
@@ -616,7 +529,13 @@ export const eliminarPago = async (req: Request, res: Response) => {
     );
 
     await client.query("COMMIT");
-    return res.json({ message: "Pago eliminado y saldo recalculado", abono_total: nuevoAbono, saldo: nuevoSaldo, estado_id: nuevoEstado, liquidado: estaLiquidado });
+    return res.json({
+      message:     "Pago eliminado y saldo recalculado",
+      abono_total: nuevoAbono,
+      saldo:       nuevoSaldo,
+      estado_id:   nuevoEstado,
+      liquidado:   estaLiquidado,
+    });
 
   } catch (error: any) {
     await client.query("ROLLBACK");

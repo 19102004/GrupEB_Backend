@@ -42,68 +42,11 @@ const CAMPOS_PROCESO: Record<string, string[]> = {
   extrusion:    ["kilos_extruir", "metros_extruir", "merma", "k_para_impresion", "metros_extruidos"],
   impresion:    ["kilos_imprimir", "metros_imprimir", "merma", "kilos_impresos", "metros_impresos"],
   bolseo:       ["kilos_bolsear", "kilos_bolseados", "kilos_merma", "piezas_bolseadas", "piezas_merma"],
-  asa_flexible: ["kilos_bolsear", "merma", "piezas_recibidas"],
+  asa_flexible: ["pzas_finales", "merma", "piezas_recibidas"],
 };
 
-// Máquinas válidas para impresión
 const MAQUINAS_IMPRESION = ["kidder", "sicosa"] as const;
 type MaquinaImpresion = typeof MAQUINAS_IMPRESION[number];
-
-// ============================================================
-// CÁLCULOS AUTOMÁTICOS
-// ============================================================
-
-function calcularMetrosExtruir(p: {
-  alto: number; ancho: number;
-  fuelle_fondo: number; fuelle_lat_iz: number; fuelle_lat_de: number;
-  refuerzo: number; cantidad: number;
-}): { metros_extruir: number; ancho_bobina: number } {
-  let ancho_bobina: number;
-  let repeticion:   number;
-
-  if (p.fuelle_fondo > 0) {
-    ancho_bobina = p.alto + p.fuelle_fondo + p.refuerzo;
-    repeticion   = p.ancho;
-  } else {
-    ancho_bobina = p.ancho + p.fuelle_lat_iz + p.fuelle_lat_de + p.refuerzo;
-    repeticion   = p.alto;
-  }
-
-  const metros_extruir = parseFloat((p.cantidad * (repeticion / 100)).toFixed(1));
-  return { metros_extruir, ancho_bobina };
-}
-
-function calcularKilosExtruir(cantidad: number, por_kilo: number): number {
-  return parseFloat((cantidad / por_kilo).toFixed(2));
-}
-
-async function getMedidasProducto(client: any, idproduccion: number) {
-  const { rows } = await client.query(`
-    SELECT
-      COALESCE(cfg.altura,        0) AS alto,
-      COALESCE(cfg.ancho,         0) AS ancho,
-      COALESCE(cfg.fuelle_fondo,  0) AS fuelle_fondo,
-      COALESCE(cfg.fuelle_latIz,  0) AS fuelle_lat_iz,
-      COALESCE(cfg.fuelle_latDe,  0) AS fuelle_lat_de,
-      COALESCE(cfg.refuerzo,      0) AS refuerzo,
-      COALESCE(cfg.por_kilo,      0) AS por_kilo,
-      COALESCE(sd.cantidad,       0) AS cantidad,
-      sd.kilogramos,
-      sd.modo_cantidad
-    FROM orden_produccion op
-    JOIN solicitud_producto sp
-        ON sp.idsolicitud_producto = op.idsolicitud_producto
-    JOIN configuracion_plastico cfg
-        ON cfg.idconfiguracion_plastico = sp.configuracion_plastico_idconfiguracion_plastico
-    LEFT JOIN solicitud_detalle sd
-        ON sd.solicitud_producto_id = sp.idsolicitud_producto
-        AND sd.aprobado = true
-    WHERE op.idproduccion = $1
-    LIMIT 1
-  `, [idproduccion]);
-
-  return rows[0] ?? null;
-}
 
 // ============================================================
 // HELPERS
@@ -163,7 +106,7 @@ export async function inicializarPrimerProceso(client: any, idproduccion: number
 }
 
 // ============================================================
-// GET /procesos/:idproduccion
+// GET /procesos/:idproduccion (MODIFICADO CON OBSERVACIONES)
 // ============================================================
 export const getProcesosOrden = async (req: Request, res: Response) => {
   try {
@@ -176,7 +119,6 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
         ep.nombre AS estado_nombre,
         s.no_pedido, sp.idsolicitud_producto,
         cfg.tipo_producto_plastico_plastico_idtipo_producto_plastico AS idtipo_producto,
-        -- datos de repetición para el selector de máquina
         op.repeticion_kidder,
         op.repeticion_sicosa
       FROM orden_produccion op
@@ -205,13 +147,18 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
       .filter(id => procesosRawRows.some((r: any) => Number(r.idproceso_cat) === id))
       .map(id => procesosRawRows.find((r: any) => Number(r.idproceso_cat) === id));
 
-    const procesos = await Promise.all(procesosRows.map(async (p: any) => {
+    // Primero obtener todos los procesos con sus registros para poder relacionarlos
+    const procesosConRegistros = await Promise.all(procesosRows.map(async (p: any) => {
       const tabla = PROCESO_TABLA[p.idproceso_cat];
 
       if (!tabla) {
         return {
-          idproceso_cat: p.idproceso_cat, nombre_proceso: p.nombre_proceso,
-          tabla: null, registro: null, estado: "no_aplica",
+          idproceso_cat: p.idproceso_cat, 
+          nombre_proceso: p.nombre_proceso,
+          tabla: null, 
+          registro: null, 
+          estado: "no_aplica",
+          observaciones: null
         };
       }
 
@@ -231,8 +178,31 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
         else                                                  estado = "pendiente";
       }
 
-      return { idproceso_cat: p.idproceso_cat, nombre_proceso: p.nombre_proceso, tabla, registro, estado };
+      return { 
+        idproceso_cat: p.idproceso_cat, 
+        nombre_proceso: p.nombre_proceso, 
+        tabla, 
+        registro, 
+        estado,
+        observaciones: registro?.observaciones || null
+      };
     }));
+
+    // Agregar observaciones del proceso anterior a cada proceso
+    const procesosConObsAnteriores = procesosConRegistros.map((proceso, index) => {
+      let observacionesProcesoAnterior = null;
+      
+      // Buscar el proceso anterior en la secuencia
+      if (index > 0) {
+        const procesoAnterior = procesosConRegistros[index - 1];
+        observacionesProcesoAnterior = procesoAnterior?.observaciones || null;
+      }
+
+      return {
+        ...proceso,
+        observaciones_proceso_anterior: observacionesProcesoAnterior
+      };
+    });
 
     let procesoActual = orden.proceso_actual;
     if (procesoActual && !PROCESO_TABLA[procesoActual]) {
@@ -249,7 +219,7 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
       estado_nombre:       orden.estado_nombre,
       repeticion_kidder:   orden.repeticion_kidder  ?? null,
       repeticion_sicosa:   orden.repeticion_sicosa  ?? null,
-      procesos,
+      procesos: procesosConObsAnteriores,
     });
 
   } catch (error: any) {
@@ -259,7 +229,7 @@ export const getProcesosOrden = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// POST /procesos/:idproduccion/iniciar
+// POST /procesos/:idproduccion/iniciar (MODIFICADO CON OBSERVACIONES NULL)
 // ============================================================
 export const iniciarProceso = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -293,13 +263,10 @@ export const iniciarProceso = async (req: Request, res: Response) => {
       return res.status(400).json({ error: `Proceso ${procesoActualCat} no tiene tabla asociada` });
     }
 
-    // ── Validar máquina si es impresión ─────────────────────
     if (procesoActualCat === PROCESO.IMPRESION) {
       if (!maquina || !MAQUINAS_IMPRESION.includes(maquina as MaquinaImpresion)) {
         await client.query("ROLLBACK");
-        return res.status(400).json({
-          error: "Debes seleccionar una máquina de impresión: kidder o sicosa",
-        });
+        return res.status(400).json({ error: "Debes seleccionar una máquina de impresión: kidder o sicosa" });
       }
     }
 
@@ -308,39 +275,19 @@ export const iniciarProceso = async (req: Request, res: Response) => {
       [idproduccion]
     );
 
-    // ── Extrusión: calcular kilos y metros automáticamente ───
+    // ── EXTRUSIÓN: usa kilos_merma y metros_merma de la orden ──
     if (procesoActualCat === PROCESO.EXTRUSION) {
-      const medidas = await getMedidasProducto(client, Number(idproduccion));
 
-      let metros_extruir: number | null = null;
-      let kilos_extruir:  number | null = null;
+      const { rows: ordenMermaRows } = await client.query(`
+        SELECT kilos_merma, metros_merma
+        FROM orden_produccion
+        WHERE idproduccion = $1
+      `, [idproduccion]);
 
-      if (medidas) {
-        const cant    = Number(medidas.cantidad);
-        const porKilo = Number(medidas.por_kilo);
+      const kilos_extruir  = ordenMermaRows[0]?.kilos_merma  ?? null;
+      const metros_extruir = ordenMermaRows[0]?.metros_merma ?? null;
 
-        if (cant > 0) {
-          const calc = calcularMetrosExtruir({
-            alto:          Number(medidas.alto),
-            ancho:         Number(medidas.ancho),
-            fuelle_fondo:  Number(medidas.fuelle_fondo),
-            fuelle_lat_iz: Number(medidas.fuelle_lat_iz),
-            fuelle_lat_de: Number(medidas.fuelle_lat_de),
-            refuerzo:      Number(medidas.refuerzo),
-            cantidad:      cant,
-          });
-          metros_extruir = calc.metros_extruir;
-          console.log(`📐 Ancho bobina: ${calc.ancho_bobina} cm | Metros: ${metros_extruir} m`);
-        }
-
-        if (medidas.modo_cantidad === "kilo" && medidas.kilogramos) {
-          kilos_extruir = parseFloat(Number(medidas.kilogramos).toFixed(2));
-        } else if (cant > 0 && porKilo > 0) {
-          kilos_extruir = calcularKilosExtruir(cant, porKilo);
-        }
-
-        console.log(`⚖️  Kilos a extruir: ${kilos_extruir} kg`);
-      }
+      console.log(`⚙️ Extrusión iniciada — kilos_merma: ${kilos_extruir} | metros_merma: ${metros_extruir}`);
 
       if (existeRows.length === 0) {
         await client.query(`
@@ -348,8 +295,9 @@ export const iniciarProceso = async (req: Request, res: Response) => {
             estado_produccion_cat_idestado_produccion_cat,
             orden_produccion_idproduccion,
             fecha_creacion, fecha_inicio,
-            metros_extruir, kilos_extruir
-          ) VALUES ($1, $2, NOW(), NOW(), $3, $4)
+            metros_extruir, kilos_extruir,
+            observaciones
+          ) VALUES ($1, $2, NOW(), NOW(), $3, $4, NULL)
         `, [ESTADO_PROD.EN_PROCESO, idproduccion, metros_extruir, kilos_extruir]);
       } else if (!existeRows[0].fecha_inicio) {
         await client.query(`
@@ -362,11 +310,9 @@ export const iniciarProceso = async (req: Request, res: Response) => {
         `, [ESTADO_PROD.EN_PROCESO, metros_extruir, kilos_extruir, idproduccion]);
       }
 
-    // Impresion: guardar maquina + repeticion en el campo maquina (TEXT)
+    // ── IMPRESIÓN ──────────────────────────────────────────────
     } else if (procesoActualCat === PROCESO.IMPRESION) {
       const maquinaCompleta = repeticion ? `${maquina} | ${repeticion}` : (maquina ?? null);
-
-      console.log(`Impresion iniciada — maquina: ${maquinaCompleta}`);
 
       if (existeRows.length === 0) {
         await client.query(`
@@ -374,8 +320,9 @@ export const iniciarProceso = async (req: Request, res: Response) => {
             estado_produccion_cat_idestado_produccion_cat,
             orden_produccion_idproduccion,
             fecha_creacion, fecha_inicio,
-            maquina
-          ) VALUES ($1, $2, NOW(), NOW(), $3)
+            maquina,
+            observaciones
+          ) VALUES ($1, $2, NOW(), NOW(), $3, NULL)
         `, [ESTADO_PROD.EN_PROCESO, idproduccion, maquinaCompleta]);
       } else if (!existeRows[0].fecha_inicio) {
         await client.query(`
@@ -387,15 +334,16 @@ export const iniciarProceso = async (req: Request, res: Response) => {
         `, [ESTADO_PROD.EN_PROCESO, maquinaCompleta, idproduccion]);
       }
 
+    // ── RESTO DE PROCESOS ──────────────────────────────────────
     } else {
-      // Resto de procesos — insert/update normal
       if (existeRows.length === 0) {
         await client.query(`
           INSERT INTO ${tabla} (
             estado_produccion_cat_idestado_produccion_cat,
             orden_produccion_idproduccion,
-            fecha_creacion, fecha_inicio
-          ) VALUES ($1, $2, NOW(), NOW())
+            fecha_creacion, fecha_inicio,
+            observaciones
+          ) VALUES ($1, $2, NOW(), NOW(), NULL)
         `, [ESTADO_PROD.EN_PROCESO, idproduccion]);
       } else if (!existeRows[0].fecha_inicio) {
         await client.query(`
@@ -435,7 +383,7 @@ export const iniciarProceso = async (req: Request, res: Response) => {
 };
 
 // ============================================================
-// PUT /procesos/:idproduccion/finalizar
+// PUT /procesos/:idproduccion/finalizar (MODIFICADO CON OBSERVACIONES)
 // ============================================================
 export const finalizarProceso = async (req: Request, res: Response) => {
   const client = await pool.connect();
@@ -491,6 +439,13 @@ export const finalizarProceso = async (req: Request, res: Response) => {
       }
     }
 
+    // 🔥 AGREGAR OBSERVACIONES si vienen en los datos
+    if (datos.observaciones !== undefined) {
+      setClauses.push(`observaciones = $${paramIdx}`);
+      values.push(datos.observaciones);
+      paramIdx++;
+    }
+
     values.push(idproduccion);
     await client.query(
       `UPDATE ${tabla} SET ${setClauses.join(", ")} WHERE orden_produccion_idproduccion = $${paramIdx}`,
@@ -522,27 +477,45 @@ export const finalizarProceso = async (req: Request, res: Response) => {
             orden_produccion_idproduccion,
             fecha_creacion,
             metros_imprimir,
-            kilos_imprimir
-          ) VALUES ($1, $2, NOW(), $3, $4)
+            kilos_imprimir,
+            observaciones
+          ) VALUES ($1, $2, NOW(), $3, $4, NULL)
           ON CONFLICT DO NOTHING
         `, [ESTADO_PROD.PENDIENTE, idproduccion, metrosSiguiente, kilosSiguiente]);
+
       } else if (tablaSiguiente === "bolseo") {
         await client.query(`
           INSERT INTO bolseo (
             estado_produccion_cat_idestado_produccion_cat,
             orden_produccion_idproduccion,
             fecha_creacion,
-            kilos_bolsear
-          ) VALUES ($1, $2, NOW(), $3)
+            kilos_bolsear,
+            observaciones
+          ) VALUES ($1, $2, NOW(), $3, NULL)
           ON CONFLICT DO NOTHING
         `, [ESTADO_PROD.PENDIENTE, idproduccion, kilosSiguiente]);
+
+      } else if (tablaSiguiente === "asa_flexible") {
+        const piezasRecibidas = datos.piezas_bolseadas ? Number(datos.piezas_bolseadas) : null;
+        await client.query(`
+          INSERT INTO asa_flexible (
+            estado_produccion_cat_idestado_produccion_cat,
+            orden_produccion_idproduccion,
+            fecha_creacion,
+            piezas_recibidas,
+            observaciones
+          ) VALUES ($1, $2, NOW(), $3, NULL)
+          ON CONFLICT DO NOTHING
+        `, [ESTADO_PROD.PENDIENTE, idproduccion, piezasRecibidas]);
+
       } else {
         await client.query(`
           INSERT INTO ${tablaSiguiente} (
             estado_produccion_cat_idestado_produccion_cat,
             orden_produccion_idproduccion,
-            fecha_creacion
-          ) VALUES ($1, $2, NOW())
+            fecha_creacion,
+            observaciones
+          ) VALUES ($1, $2, NOW(), NULL)
           ON CONFLICT DO NOTHING
         `, [ESTADO_PROD.PENDIENTE, idproduccion]);
       }
@@ -552,8 +525,6 @@ export const finalizarProceso = async (req: Request, res: Response) => {
         SET proceso_actual = $1, idestado_produccion_cat = $2
         WHERE idproduccion = $3
       `, [siguienteProceso, ESTADO_PROD.PENDIENTE, idproduccion]);
-
-      console.log(`✅ ${tabla} → ${tablaSiguiente}`);
 
     } else {
       await client.query(`
@@ -619,7 +590,7 @@ export const resagarProceso = async (req: Request, res: Response) => {
     await client.query("COMMIT");
 
     return res.json({
-      message: "Proceso marcado como resagado",
+      message:      "Proceso marcado como resagado",
       idproduccion: Number(idproduccion),
       tabla,
     });
